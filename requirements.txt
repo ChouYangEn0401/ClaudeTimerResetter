@@ -1,0 +1,2 @@
+# ClaudeLogin 的官方 release wheel（純標準函式庫，零第三方相依）
+https://github.com/ChouYangEn0401/ClaudeLogin/releases/download/v0.2.0/claude_subscription-0.2.0-py3-none-any.whl
