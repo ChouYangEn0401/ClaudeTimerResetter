@@ -37,23 +37,25 @@ PROMPT = "hi"
 EXIT_OK, EXIT_FAIL, EXIT_NO_BIN, EXIT_AUTH, EXIT_ARGS = 0, 1, 2, 3, 4
 
 
-def main() -> int:
-    as_json = "--json" in sys.argv
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")  # Windows 主控台是 cp950
-        except (AttributeError, ValueError):
-            pass
+def run_probe(budget_usd: float = BUDGET_USD) -> dict:
+    """跑一次探針，回傳結構化結果，不印任何東西。
 
+    CLI 輸出格式交給 main()；排程 (installer.py --tick) 跟 GUI/tray 都直接
+    吃這個 dict，避免每個進入點各自重寫一次探針邏輯。
+    """
     try:
         from claude_subscription import (
             ClaudeAuthError, ClaudeError, ClaudeNotFoundError, ask, find_claude_binary,
         )
     except ImportError as e:
-        print(f"[X] 套件沒裝好：{e}\n    pip install "
-              "https://github.com/ChouYangEn0401/ClaudeLogin/releases/download/"
-              "v0.2.0/claude_subscription-0.2.0-py3-none-any.whl", file=sys.stderr)
-        return EXIT_ARGS
+        return {
+            "ok": False,
+            "exit_code": EXIT_ARGS,
+            "reason": "套件沒裝好：請 pip install "
+                      "https://github.com/ChouYangEn0401/ClaudeLogin/releases/download/"
+                      "v0.2.0/claude_subscription-0.2.0-py3-none-any.whl",
+            "detail": str(e),
+        }
 
     t0 = time.time()
     try:
@@ -64,32 +66,57 @@ def main() -> int:
             tools="",                     # 純文字進出＝最便宜
             permission_mode="manual",
             persist=False,                # 不留 session、不重送歷史
-            max_budget_usd=BUDGET_USD,
+            max_budget_usd=budget_usd,
             timeout=90,
         )
     except ClaudeNotFoundError as e:
-        _out(as_json, ok=False, reason="找不到 claude 執行檔（請安裝官方 Claude Code）", detail=str(e))
-        return EXIT_NO_BIN
+        return {"ok": False, "exit_code": EXIT_NO_BIN,
+                "reason": "找不到 claude 執行檔（請安裝官方 Claude Code）", "detail": str(e)}
     except ClaudeAuthError as e:
-        _out(as_json, ok=False, reason="未登入或認證失敗（請執行 claude 登入）", detail=str(e))
-        return EXIT_AUTH
+        return {"ok": False, "exit_code": EXIT_AUTH,
+                "reason": "未登入或認證失敗（請執行 claude 登入）", "detail": str(e)}
     except ClaudeError as e:
-        _out(as_json, ok=False, reason="呼叫失敗（額度用完 / 逾時 / 模型錯誤）", detail=str(e))
-        return EXIT_FAIL
+        return {"ok": False, "exit_code": EXIT_FAIL,
+                "reason": "呼叫失敗（額度用完 / 逾時 / 模型錯誤）", "detail": str(e)}
 
     elapsed = time.time() - t0
+    return {
+        "ok": True,
+        "exit_code": EXIT_OK,
+        "model": MODEL,
+        "reply": (r.text or "").strip(),
+        "cost_usd": r.cost_usd,
+        "seconds": round(elapsed, 2),
+        "binary": binary,
+    }
+
+
+def main() -> int:
+    as_json = "--json" in sys.argv
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # Windows 主控台是 cp950
+        except (AttributeError, ValueError):
+            pass
+
+    result = run_probe()
+    if not result["ok"]:
+        _out(as_json, ok=False, reason=result["reason"], detail=result["detail"])
+        return result["exit_code"]
+
     if as_json:
         print(json.dumps({
-            "ok": True, "model": MODEL, "reply": (r.text or "").strip(),
-            "cost_usd": r.cost_usd, "seconds": round(elapsed, 2), "binary": binary,
+            "ok": True, "model": result["model"], "reply": result["reply"],
+            "cost_usd": result["cost_usd"], "seconds": result["seconds"],
+            "binary": result["binary"],
         }, ensure_ascii=False))
     else:
         print("[OK] Claude 可以用")
-        print(f"     模型     : {MODEL}")
-        print(f"     回覆     : {(r.text or '').strip()[:120]}")
-        print(f"     花費     : ${r.cost_usd:.5f}")
-        print(f"     耗時     : {elapsed:.1f}s")
-        print(f"     執行檔   : {binary}")
+        print(f"     模型     : {result['model']}")
+        print(f"     回覆     : {result['reply'][:120]}")
+        print(f"     花費     : ${result['cost_usd']:.5f}")
+        print(f"     耗時     : {result['seconds']:.1f}s")
+        print(f"     執行檔   : {result['binary']}")
     return EXIT_OK
 
 
