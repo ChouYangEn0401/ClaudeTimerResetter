@@ -3,4 +3,8 @@ __pycache__/
 *.py[cod]
 build/
 dist/
+
+# PyInstaller 產生的暫時 spec 不要進版控，但 packaging/ 底下那兩份是手寫的
+# 打包設定，跟原始碼同進退，一定要留著（見 build.bat）。
 *.spec
+!packaging/*.spec

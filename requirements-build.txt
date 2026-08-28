@@ -1,0 +1,6 @@
+# Build-only dependencies. Running test.bat / usage.bat does NOT need these.
+# build.bat installs this automatically; manually:
+#   .venv\Scripts\python -m pip install -r requirements-build.txt
+pyinstaller>=6.0
+pystray>=0.19
+pillow>=10.0

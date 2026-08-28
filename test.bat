@@ -18,7 +18,7 @@ cd /d "%~dp0"
 
 if not exist ".venv\Scripts\python.exe" (
     echo [!] no .venv found - creating it ...
-    call setup.bat || exit /b 4
+    call "%~dp0setup.bat" || exit /b 4
 )
 
 ".venv\Scripts\python.exe" ping.py %*
