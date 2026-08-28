@@ -81,19 +81,29 @@ def run_tick_once() -> int:
     rule_list = rules_mod.load_rules(rules_path())
     state = rules_mod.load_state(state_path())
     now = datetime.now()
+    snap = rules_mod.snapshot(state)
     due_ids, state = rules_mod.compute_due(rule_list, state, now)
     rules_mod.save_state(state_path(), state)
 
     exit_code = 0
     for rid in due_ids:
-        result = ping.run_probe()
+        # max_wait_seconds=0：這條路是 Task Scheduler，工作跑超過 5 分鐘會被砍，
+        # 不能在這裡 sleep 等重置。ping 回 waiting 時把規則狀態還原，讓下一分鐘
+        # 的 tick 再判一次——用 tick 節奏代替 sleep，語意一樣。
+        result = ping.refresh(max_wait_seconds=0)
+        if result["action"] == "waiting":
+            state = rules_mod.rollback(state, snap, rid)
+            rules_mod.save_state(state_path(), state)
+            append_log(f"{now.isoformat(timespec='seconds')} [WAIT] rule={rid} "
+                       f"{ping.summarize(result)}")
+            continue
         state = rules_mod.record_result(state, rid, result["ok"])
         rules_mod.save_state(state_path(), state)
         tag = "OK" if result["ok"] else "FAIL"
-        detail = result.get("reply") if result["ok"] else result.get("reason", "")
-        append_log(f"{now.isoformat(timespec='seconds')} [{tag}] rule={rid} {str(detail)[:80]}")
+        detail = ping.summarize(result) if result["ok"] else result["probe"]["reason"]
+        append_log(f"{now.isoformat(timespec='seconds')} [{tag}] rule={rid} {str(detail)[:120]}")
         if not result["ok"]:
-            exit_code = result.get("exit_code", 1)
+            exit_code = result["exit_code"]
     return exit_code
 
 
@@ -388,13 +398,18 @@ class App(tk.Tk):
     def _test_now(self) -> None:
         self.status_var.set("測試中，請稍候（約需 5 秒）...")
         self.update()
-        result = ping.run_probe()
-        if result["ok"]:
+        # 跟排程走同一條路：已經刷新過就不打，按幾次都不會多花錢。
+        result = ping.refresh(max_wait_seconds=0)
+        if not result["ok"]:
+            self.status_var.set(f"[X] {result['probe']['reason']}")
+            return
+        if result["action"] == "refreshed":
+            p = result["probe"]
             self.status_var.set(
-                f"[OK] 模型 {result['model']}｜花費 ${result['cost_usd']:.5f}｜耗時 {result['seconds']}s"
+                f"[OK] 已刷新｜模型 {p['model']}｜花費 ${p['cost_usd']:.5f}｜耗時 {p['seconds']}s"
             )
         else:
-            self.status_var.set(f"[X] {result['reason']}")
+            self.status_var.set(f"[{result['action'].upper()}] {result['reason']}")
 
     def _install(self) -> None:
         if not self.rule_list:

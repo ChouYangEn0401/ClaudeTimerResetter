@@ -12,6 +12,7 @@ Task Scheduler 跟工具列常駐兩種背景執行方式（driver）都呼叫�
 """
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 from datetime import datetime, timedelta
@@ -132,6 +133,29 @@ def record_result(state: dict, rule_id: str, ok: bool) -> dict:
     rs = state.get("rules", {}).get(rule_id)
     if rs is not None and "succeeded" in rs:
         rs["succeeded"] = rs.get("succeeded") or ok
+    return state
+
+
+def snapshot(state: dict) -> dict:
+    """在 compute_due() 之前先留一份，配 rollback() 用。"""
+    return copy.deepcopy(state)
+
+
+def rollback(state: dict, snap: dict, rule_id: str) -> dict:
+    """把某一條規則的狀態還原成 compute_due() 之前的樣子。
+
+    用在「這次其實沒真的做事」的情況：ping 回報還在等 5 小時視窗重置時，
+    這一次觸發不該被算掉，否則 interval 規則會白白等下一個週期、daily_times
+    會整天不再重試。還原之後下一次 tick 會重新判定為到期，等於用既有的
+    tick 節奏做「時間到再確認一次」，不必讓單次 tick 卡在 sleep 裡——
+    Task Scheduler 那條路 5 分鐘就會被砍（見 scheduler.py）。
+    """
+    rules_state = state.setdefault("rules", {})
+    before = snap.get("rules", {}).get(rule_id)
+    if before is None:
+        rules_state.pop(rule_id, None)
+    else:
+        rules_state[rule_id] = copy.deepcopy(before)
     return state
 
 

@@ -45,17 +45,29 @@ def _run_due_rules(install_dir: Path, tag_prefix: str = "") -> None:
     rule_list = rules_mod.load_rules(rules_path)
     state = rules_mod.load_state(state_path)
     now = datetime.now()
+    snap = rules_mod.snapshot(state)
     due_ids, state = rules_mod.compute_due(rule_list, state, now)
     rules_mod.save_state(state_path, state)
     for rid in due_ids:
-        result = ping.run_probe()
+        # 跟 installer.py --tick 同一套：不在工作執行緒裡 sleep 等重置，
+        # 改成還原規則狀態、讓 25 秒後的下一輪 tick 再判一次。
+        result = ping.refresh(max_wait_seconds=0)
+        if result["action"] == "waiting":
+            state = rules_mod.rollback(state, snap, rid)
+            rules_mod.save_state(state_path, state)
+            _append_log(
+                install_dir,
+                f"{now.isoformat(timespec='seconds')} [WAIT]{tag_prefix} rule={rid} "
+                f"{ping.summarize(result)}",
+            )
+            continue
         state = rules_mod.record_result(state, rid, result["ok"])
         rules_mod.save_state(state_path, state)
         tag = "OK" if result["ok"] else "FAIL"
-        detail = result.get("reply") if result["ok"] else result.get("reason", "")
+        detail = ping.summarize(result) if result["ok"] else result["probe"]["reason"]
         _append_log(
             install_dir,
-            f"{now.isoformat(timespec='seconds')} [{tag}]{tag_prefix} rule={rid} {str(detail)[:80]}",
+            f"{now.isoformat(timespec='seconds')} [{tag}]{tag_prefix} rule={rid} {str(detail)[:120]}",
         )
 
 
@@ -81,12 +93,12 @@ def run(install_dir: Path, exe_path: str) -> None:
         subprocess.Popen([exe_path])
 
     def _test_now(icon: pystray.Icon, item: pystray.MenuItem) -> None:
-        result = ping.run_probe()
+        result = ping.refresh(max_wait_seconds=0)
         tag = "OK" if result["ok"] else "FAIL"
-        detail = result.get("reply") if result["ok"] else result.get("reason", "")
+        detail = ping.summarize(result) if result["ok"] else result["probe"]["reason"]
         _append_log(
             install_dir,
-            f"{datetime.now().isoformat(timespec='seconds')} [{tag}] manual test {str(detail)[:80]}",
+            f"{datetime.now().isoformat(timespec='seconds')} [{tag}] manual test {str(detail)[:120]}",
         )
 
     def _quit(icon: pystray.Icon, item: pystray.MenuItem) -> None:
