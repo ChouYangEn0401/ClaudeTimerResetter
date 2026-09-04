@@ -1,28 +1,40 @@
 # -*- coding: utf-8 -*-
 """resumer.py — 定時接續指定 Claude Code 對話的獨立小工具。
 
-跟 installer.py（背景反覆探針，見 README「設計理念」一節）是完全獨立的兩個程式：
-    installer.py  常駐/排程，反覆執行同一件便宜的事（ping.refresh() 的探針）
-    resumer.py    手動打開，一次性排定「時間到了幫我把某個特定對話接著送出去」，
-                  真的送出去、而且確認沒有馬上失敗之後才關掉
+跟 installer.py（背景反覆探針，見 README「設計理念」一節）是完全獨立的兩個程式，
+而且時機點的含義完全不同，別搞混：
+
+    installer.py（resetter）  「主動排重置」：token 卡住時反覆做一件便宜的事
+                              （ping.refresh() 探針），把 5 小時視窗的重置時鐘催起來。
+                              它會去查用量、算時間、決定打不打——那是它的本分。
+    resumer.py                「已知重置點、準時送」：你（人）已經知道 token 幾點恢復，
+                              就設在那個時間點，時間一到直接把那個對話接著送出去。
+                              你設的時間就是最終決定，這支工具不去二次確認用量。
 
 用法：被 Claude Code 的 session limit 卡住、畫面顯示大概幾點會重置時，打開這支工具，
 從清單挑出被卡住的那個對話、寫（或用預設 "continue"）要接著送出的內容、設定重置時間，
 選好「自動送出」還是「時間到手動確認再送出」，加入佇列。
 
-時間到之後不是傻傻地就送：先花 0 元查一次用量（usage.py），如果 5 小時視窗還沒重置，
-就繼續等，最多從預定時間起再等 WAIT_LIMIT_SECONDS（15 分鐘），時間到就照送。
-送出後還會盯著那個行程 CONFIRM_SECONDS 秒——馬上死掉的話（最常見的兩種：對話正開在
-VSCode 裡「already in use」、或 session id 找不到）就標成失敗並把錯誤印在畫面上，
-不會騙你說已送出。全部確認送出之後視窗才會自己關掉。
+時間一到就直接送——不查用量、不自作主張壓著等（那是 resetter 的職責，不是這裡的）。
 
-之後要接著看那個對話在做什麼，使用者自己回 VSCode 重新開啟即可——這支工具只負責
-「準時把 continue 送出去」這一件事。
+**最重要的一條鐵律：送出的那一刻，那個對話不能開在 VSCode（或任何地方）裡。**
+Claude Code 的 session 同一時間只能有一個持有者，重複開會回
+「Session ID ... is already in use」然後秒退。本工具靠 ~/.claude/sessions/<pid>.json
+（每個正在跑的 Claude Code 行程都會寫一份，含 sessionId）在**不花任何 token**的前提下
+偵測某個對話是不是正被佔用；被佔用就擋下來、不白送，並提醒你把 VSCode 那個對話關掉。
+關掉之後（自動模式）下一秒就會自己補送。
+
+送出的是一個獨立於本程式的 claude 行程（DETACHED_PROCESS），所以確認送出之後把這支
+工具關掉，被接續的那個對話還是會在背景繼續跑完。之後想看它做了什麼，回 VSCode 重新
+開啟該對話即可——CLI 跟 VSCode 共用同一份 ~/.claude/projects 記錄，`--resume` 是往
+同一個對話檔接著寫（實測不會分岔成新檔），所以看得到接續之後那一段。
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -30,30 +42,67 @@ import tkinter as tk
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
-
-import usage as usage_mod
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ClaudeTimerResetter"
 LOG_PATH = APP_DATA_DIR / "resumer.log"
+SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 
 PERMISSION_MODES = ["(不覆寫)", "acceptEdits", "bypassPermissions", "dontAsk", "plan"]
 
-# 預定時間到了但 5 小時視窗還沒重置時，最多再等這麼久，然後不管三七二十一照送。
-WAIT_LIMIT_SECONDS = 15 * 60
-# 重置時間剛過的那一秒容易比伺服器早一步，多留一點緩衝。
-WAIT_GRACE_SECONDS = 20
+# 每個權限模式的中文說明（GUI 即時顯示）。resumer 是 --print 非互動執行，
+# 沒有人能回應中途的權限提示，所以這個下拉在這裡其實比想像中重要。
+PERMISSION_HELP = {
+    "(不覆寫)": (
+        "不加任何 --permission-mode 參數，沿用那個對話 / 專案原本的設定。最保守。\n"
+        "但注意：resumer 是非互動（--print）執行，若那個對話中途需要工具權限確認，"
+        "沒有人能按「同意」，它可能就卡住或中止——而且不會跳到 VSCode 讓你按。"
+        "會改到檔案的接續，建議改選 acceptEdits。"
+    ),
+    "acceptEdits": (
+        "自動同意「檔案編輯」類的權限，不會停下來問。\n"
+        "最適合 resumer 的日常用法：讓接續的對話能一路把改檔的工作做完。"
+    ),
+    "bypassPermissions": (
+        "略過所有權限檢查，什麼都不問直接做（包含執行指令）。\n"
+        "最不中斷、但也最不設防。只有你完全清楚那個對話接下來要做什麼、而且信任它時才用。"
+    ),
+    "dontAsk": (
+        "不主動詢問權限（行為接近沿用既有設定但不彈提示）。\n"
+        "不確定的話用 acceptEdits 比較好懂。"
+    ),
+    "plan": (
+        "計畫模式：只讓它規劃、不實際動手改東西。\n"
+        "適合你只想讓它「接著想 / 接著規劃」，還不要它真的執行的情況。"
+    ),
+}
+
 # 送出後盯著子行程這麼久；這段時間內就死掉的視為失敗（錯誤才有機會被看到）。
 CONFIRM_SECONDS = 60
-# 用量查詢的快取秒數，避免 1 秒一次的 tick 狂打那支端點。
-QUOTA_CACHE_SECONDS = 30
 
 STATUS_WAITING = "等待中"
-STATUS_HOLDING = "等重置"
 STATUS_MANUAL = "時間到，等待手動送出"
+STATUS_LOCKED = "被佔用，請關閉 VSCode 後會自動補送"
 STATUS_SENDING = "送出中，確認中"
 STATUS_SENT = "已送出"
 STATUS_FAILED = "失敗"
+
+# ---------- 配色（clam 主題微調，走乾淨淺色 + 藍色重點）----------
+COLORS = {
+    "bg": "#f4f5f7",
+    "card": "#ffffff",
+    "border": "#d9dce1",
+    "text": "#1f2430",
+    "muted": "#6b7280",
+    "accent": "#2563eb",
+    "accent_fg": "#ffffff",
+    "ok": "#15803d",
+    "warn": "#b45309",
+    "err": "#b91c1c",
+    "list_sel": "#dbeafe",
+    "log_bg": "#0f172a",
+    "log_fg": "#e2e8f0",
+}
 
 
 def _claude_binary() -> str:
@@ -69,6 +118,67 @@ def _append_log(line: str) -> None:
 
 def _stamp() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+# ---------- 對話「正在被誰佔用」的零成本偵測 ----------
+
+def _pid_alive_claude(pid: int) -> bool:
+    """這個 pid 還活著、而且看起來真的是 claude（避免 pid 被別的程式重用時誤判）。
+
+    非 Windows 或查不到映像名稱時，保守地當作「還活著」——寧可多擋一次（提醒使用者
+    確認），也不要漏掉「其實正被佔用」而白送一次必然失敗的接續。
+    """
+    if platform.system() != "Windows":
+        return True
+    try:
+        k = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not h:
+            return False  # 開不了＝行程不在了＝這份 session 檔是殘留
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = ctypes.c_uint(1024)
+            ok = k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+            name = buf.value.lower() if ok else ""
+            return ("claude" in name) or (name == "")
+        finally:
+            k.CloseHandle(h)
+    except Exception:
+        return True
+
+
+def session_holder(session_id: str) -> dict | None:
+    """這個 session 現在是不是正被某個活著的 Claude Code 行程佔用？
+
+    回傳持有者資訊（含 pid / entrypoint / cwd），沒有被佔用則回 None。純讀本機檔案，
+    不花任何 token。資料來源是 ~/.claude/sessions/<pid>.json——每個正在跑的 Claude Code
+    行程（含 VSCode 擴充）都會寫一份，裡面有它現在開著的 sessionId。
+    """
+    if not SESSIONS_DIR.exists():
+        return None
+    for f in SESSIONS_DIR.glob("*.json"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if d.get("sessionId") != session_id:
+            continue
+        pid = d.get("pid")
+        if pid and _pid_alive_claude(pid):
+            return {
+                "pid": pid,
+                "entrypoint": d.get("entrypoint", "?"),
+                "cwd": d.get("cwd", ""),
+                "name": d.get("name", ""),
+            }
+    return None
+
+
+def describe_holder(holder: dict) -> str:
+    where = "VSCode" if str(holder.get("entrypoint", "")).endswith("vscode") else holder.get("entrypoint", "?")
+    name = f"「{holder['name']}」" if holder.get("name") else ""
+    return f"目前正開在 {where}（pid {holder['pid']}）{name}"
 
 
 # ---------- 掃描本機所有 Claude Code 對話 ----------
@@ -137,14 +247,13 @@ def _extract_text(content) -> str | None:
     return None
 
 
-# ---------- 送出前的檢查 ----------
+# ---------- 送出前的檢查（都不花錢）----------
 
 def preflight(session: dict) -> list[str]:
-    """回傳擋住送出的理由清單（空的＝可以送）。純本機檢查，不花錢。
+    """靜態本機檢查：擋住送出的理由清單（空的＝這些項目沒問題）。
 
-    這支工具以前是 fire-and-forget，任何一項出錯都只會安靜地什麼都沒發生
-    （--windowed 打包沒有主控台，例外訊息無處可去），所以這裡先一次檢查完，
-    把問題直接寫到畫面上。
+    這裡只查「不會變」的東西（執行檔、對話檔、專案資料夾）。「有沒有被佔用」是會隨
+    你開關 VSCode 而變的，另外用 session_holder() 動態查，不放在這裡。
     """
     problems: list[str] = []
     try:
@@ -181,13 +290,12 @@ class Task:
         self.error: str | None = None
         self.proc: subprocess.Popen | None = None
         self.fired_at: float | None = None
-        self.hold_until = when + timedelta(seconds=WAIT_LIMIT_SECONDS)
         self.log_path = APP_DATA_DIR / f"resume-{self.id}.log"
 
     def label(self) -> str:
         tail = f" | {self.error}" if self.error else ""
         return (
-            f"[{self.when.strftime('%H:%M')}] {self.session['cwd'] or '(無專案路徑)'} | "
+            f"[{self.when.strftime('%H:%M:%S')}] {self.session['cwd'] or '(無專案路徑)'} | "
             f"{self.session['preview'][:30]} | {self.mode} | {self.status}{tail}"
         )
 
@@ -195,14 +303,31 @@ class Task:
     def done(self) -> bool:
         return self.status == STATUS_SENT
 
+    @property
+    def settled(self) -> bool:
+        """已經有最終結果、不再需要 tick 幫它做事（送出成功或硬失敗）。"""
+        return self.status in (STATUS_SENT, STATUS_FAILED)
+
     # -- 送出 --
 
     def fire(self) -> bool:
-        """真的把 prompt 送出去。回傳有沒有成功「啟動」，錯誤寫進 self.error。"""
+        """真的把 prompt 送出去。回傳有沒有成功「啟動」，錯誤寫進 self.error。
+
+        送出前先做兩道零成本檢查：靜態 preflight + 動態的「有沒有被佔用」。被佔用時
+        不標成硬失敗，而是標 STATUS_LOCKED——自動模式的 tick 會在你關掉 VSCode 之後
+        自己補送，不用你重排。
+        """
         problems = preflight(self.session)
         if problems:
             self._fail("；".join(problems))
             return False
+
+        holder = session_holder(self.session["session_id"])
+        if holder:
+            self.status = STATUS_LOCKED
+            self.error = f"{describe_holder(holder)}，請關閉後它會自動補送"
+            return False
+
         try:
             exe = _claude_binary()
         except Exception as e:
@@ -224,8 +349,7 @@ class Task:
                 args,
                 # 關鍵：一定要在該對話自己的專案資料夾裡跑。Claude Code 的 session
                 # 是按專案目錄存的（~/.claude/projects/<專案>/<id>.jsonl），在別的
-                # 目錄下 --resume 這個 id 會直接「找不到這個對話」。舊版沒給 cwd，
-                # 所以看起來像是「排程有跑但什麼都沒發生」。
+                # 目錄下 --resume 這個 id 會直接「找不到這個對話」。
                 cwd=self.session["cwd"],
                 # DETACHED_PROCESS 之下沒有主控台，stdin 若用繼承的會是無效 handle。
                 stdin=subprocess.DEVNULL,
@@ -244,6 +368,7 @@ class Task:
                 log.close()
 
         self.status = STATUS_SENDING
+        self.error = None
         self.fired_at = time.monotonic()
         _append_log(f"{_stamp()} FIRE task={self.id} session={self.session['session_id']} "
                     f"cwd={self.session['cwd']} prompt={self.prompt[:60]!r}")
@@ -289,80 +414,262 @@ class Task:
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
+        self._init_scaling_and_style()
         self.title("Claude 對話接續排程器")
-        self.geometry("880x760")
+        self.geometry("960x820")
+        self.minsize(820, 720)
+        self.configure(bg=COLORS["bg"])
         self._closing = False
         self.sessions = scan_sessions()
         self._visible_sessions: list[dict] = []
         self.tasks: list[Task] = []
-        self._quota: dict | None = None
-        self._quota_at = 0.0
 
-        top = ttk.LabelFrame(self, text="選擇對話", padding=8)
-        top.pack(fill="both", expand=True, padx=10, pady=8)
+        self._build_ui()
 
-        filter_row = ttk.Frame(top)
+        self._refresh_session_list()
+        self._refresh_perm_help()
+        self._sync_time_format()
+        self._say(f"掃到 {len(self.sessions)} 個對話。記錄檔：{LOG_PATH}")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(250, self._tick)
+
+    # -- 外觀 --
+
+    def _init_scaling_and_style(self) -> None:
+        # 高 DPI：讓 Tk 依系統縮放，字不會糊、版面不會擠成一團。
+        if platform.system() == "Windows":
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                try:
+                    ctypes.windll.user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+        try:
+            dpi = self.winfo_fpixels("1i")
+            self.tk.call("tk", "scaling", dpi / 72.0)
+        except Exception:
+            pass
+
+        base = tkfont.nametofont("TkDefaultFont")
+        family = "Segoe UI" if platform.system() == "Windows" else base.actual("family")
+        base.configure(family=family, size=10)
+        self.option_add("*Font", base)
+        self._font_h1 = tkfont.Font(family=family, size=15, weight="bold")
+        self._font_h2 = tkfont.Font(family=family, size=11, weight="bold")
+        self._font_small = tkfont.Font(family=family, size=9)
+        self._font_mono = tkfont.Font(family="Consolas", size=9)
+
+        st = ttk.Style(self)
+        st.theme_use("clam")
+        c = COLORS
+        st.configure(".", background=c["bg"], foreground=c["text"])
+        st.configure("Card.TFrame", background=c["card"])
+        st.configure("TFrame", background=c["bg"])
+        st.configure("TLabel", background=c["bg"], foreground=c["text"])
+        st.configure("Card.TLabel", background=c["card"], foreground=c["text"])
+        st.configure("Muted.TLabel", background=c["card"], foreground=c["muted"], font=self._font_small)
+        st.configure("MutedBg.TLabel", background=c["bg"], foreground=c["muted"], font=self._font_small)
+        st.configure("H2.TLabel", background=c["card"], foreground=c["text"], font=self._font_h2)
+        st.configure("TCheckbutton", background=c["card"], foreground=c["text"])
+        st.map("TCheckbutton", background=[("active", c["card"])])
+        st.configure("TRadiobutton", background=c["card"], foreground=c["text"])
+        st.map("TRadiobutton", background=[("active", c["card"])])
+        st.configure("Card.TLabelframe", background=c["card"], bordercolor=c["border"], relief="solid", borderwidth=1)
+        st.configure("Card.TLabelframe.Label", background=c["card"], foreground=c["accent"], font=self._font_h2)
+        st.configure("TEntry", fieldbackground="#ffffff", bordercolor=c["border"])
+        st.configure("TCombobox", fieldbackground="#ffffff", bordercolor=c["border"])
+        # 一般按鈕
+        st.configure("TButton", background="#eef0f3", foreground=c["text"], borderwidth=1,
+                     bordercolor=c["border"], focuscolor=c["bg"], padding=(10, 5))
+        st.map("TButton", background=[("active", "#e2e5ea"), ("pressed", "#d5d9df")])
+        # 主要行動按鈕（藍）
+        st.configure("Accent.TButton", background=c["accent"], foreground=c["accent_fg"],
+                     borderwidth=0, padding=(14, 6), font=self._font_h2)
+        st.map("Accent.TButton", background=[("active", "#1d4ed8"), ("pressed", "#1e40af")])
+        st.configure("Vertical.TScrollbar", background="#e2e5ea", troughcolor=c["card"],
+                     bordercolor=c["card"], arrowcolor=c["muted"])
+
+    def _card(self, parent, title: str) -> ttk.Labelframe:
+        f = ttk.Labelframe(parent, text=title, style="Card.TLabelframe", padding=12)
+        return f
+
+    def _build_ui(self) -> None:
+        c = COLORS
+        outer = ttk.Frame(self, padding=(14, 12))
+        outer.pack(fill="both", expand=True)
+
+        # 標題 + 那條最重要的提醒
+        header = ttk.Frame(outer)
+        header.pack(fill="x")
+        ttk.Label(header, text="Claude 對話接續排程器", font=self._font_h1).pack(anchor="w")
+        ttk.Label(
+            header,
+            text="時間一到就把選定的對話接著送出去。鐵律：送出當下該對話不能開在 VSCode 裡"
+                 "（會被鎖住）。本工具會在不花 token 的情況下先幫你偵測、擋下並提醒。",
+            style="MutedBg.TLabel", wraplength=920, justify="left",
+        ).pack(anchor="w", pady=(2, 10))
+
+        # --- 選擇對話 ---
+        top = self._card(outer, "① 選擇要接續的對話")
+        top.pack(fill="both", expand=True)
+        filter_row = ttk.Frame(top, style="Card.TFrame")
         filter_row.pack(fill="x")
-        ttk.Label(filter_row, text="篩選:").pack(side="left")
+        ttk.Label(filter_row, text="篩選：", style="Card.TLabel").pack(side="left")
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *a: self._refresh_session_list())
         ttk.Entry(filter_row, textvariable=self.filter_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(filter_row, text="重新整理", command=self._reload_sessions).pack(side="left")
-        ttk.Button(filter_row, text="檢查選取的對話", command=self._diagnose).pack(side="left", padx=(6, 0))
+        ttk.Button(filter_row, text="檢查可否傳送（不花錢）", command=self._diagnose).pack(side="left", padx=(6, 0))
 
-        self.session_list = tk.Listbox(top, height=10)
-        self.session_list.pack(fill="both", expand=True, pady=(6, 0))
+        list_wrap = ttk.Frame(top, style="Card.TFrame")
+        list_wrap.pack(fill="both", expand=True, pady=(8, 0))
+        self.session_list = tk.Listbox(
+            list_wrap, height=9, activestyle="none", borderwidth=1, relief="solid",
+            highlightthickness=0, font=self._font_small, bg="#ffffff", fg=c["text"],
+            selectbackground=c["list_sel"], selectforeground=c["text"],
+        )
+        self.session_list.pack(side="left", fill="both", expand=True)
+        sbar = ttk.Scrollbar(list_wrap, command=self.session_list.yview)
+        sbar.pack(side="left", fill="y")
+        self.session_list.config(yscrollcommand=sbar.set)
 
-        form = ttk.LabelFrame(self, text="新增排程任務", padding=8)
-        form.pack(fill="x", padx=10, pady=8)
+        # --- 新增任務 ---
+        form = self._card(outer, "② 排程內容")
+        form.pack(fill="x", pady=(12, 0))
         form.columnconfigure(1, weight=1)
 
-        ttk.Label(form, text="Prompt:").grid(row=0, column=0, sticky="nw")
-        self.prompt_text = tk.Text(form, height=4, width=60)
+        ttk.Label(form, text="要接著送出的內容：", style="Card.TLabel").grid(row=0, column=0, sticky="nw")
+        self.prompt_text = tk.Text(form, height=4, width=60, borderwidth=1, relief="solid",
+                                   highlightthickness=0, font=self._font_small, bg="#ffffff", fg=c["text"])
         self.prompt_text.insert("1.0", "continue")
-        self.prompt_text.grid(row=0, column=1, columnspan=3, sticky="ew", padx=6)
-        ttk.Button(form, text="附加檔案...", command=self._attach_file).grid(row=1, column=1, sticky="w", padx=6, pady=(2, 0))
+        self.prompt_text.grid(row=0, column=1, columnspan=3, sticky="ew", padx=(8, 0))
+        ttk.Button(form, text="附加檔案…", command=self._attach_file).grid(
+            row=1, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
 
-        ttk.Label(form, text="時間 (HH:MM):").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        self.time_var = tk.StringVar(value=(datetime.now() + timedelta(minutes=5)).strftime("%H:%M"))
-        ttk.Entry(form, textvariable=self.time_var, width=10).grid(row=2, column=1, sticky="w", padx=6, pady=(6, 0))
+        # 時間 + 精準到秒 + 現在時間
+        ttk.Label(form, text="送出時間：", style="Card.TLabel").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        time_row = ttk.Frame(form, style="Card.TFrame")
+        time_row.grid(row=2, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(10, 0))
+        self.time_var = tk.StringVar()
+        self.time_entry = ttk.Entry(time_row, textvariable=self.time_var, width=12, font=self._font_h2)
+        self.time_entry.pack(side="left")
+        self.seconds_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(time_row, text="精準到秒 (HH:MM:SS)", variable=self.seconds_var,
+                        command=self._sync_time_format).pack(side="left", padx=(10, 0))
+        self.clock_var = tk.StringVar(value="")
+        ttk.Label(time_row, textvariable=self.clock_var, style="Muted.TLabel").pack(side="left", padx=(16, 0))
+        ttk.Button(time_row, text="＝現在", command=self._set_time_now).pack(side="left", padx=(10, 0))
+        ttk.Button(time_row, text="+1 分", command=lambda: self._bump_time(60)).pack(side="left", padx=(4, 0))
 
-        ttk.Label(form, text="送出方式:").grid(row=2, column=2, sticky="w", pady=(6, 0))
+        # 送出方式
+        ttk.Label(form, text="送出方式：", style="Card.TLabel").grid(row=3, column=0, sticky="w", pady=(10, 0))
         self.mode_var = tk.StringVar(value="auto")
-        mode_box = ttk.Frame(form)
-        mode_box.grid(row=2, column=3, sticky="w", pady=(6, 0))
+        mode_box = ttk.Frame(form, style="Card.TFrame")
+        mode_box.grid(row=3, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(10, 0))
         ttk.Radiobutton(mode_box, text="自動送出", variable=self.mode_var, value="auto").pack(side="left")
-        ttk.Radiobutton(mode_box, text="時間到手動確認", variable=self.mode_var, value="manual").pack(side="left")
+        ttk.Radiobutton(mode_box, text="時間到手動確認", variable=self.mode_var, value="manual").pack(side="left", padx=(12, 0))
+        ttk.Label(
+            form,
+            text="「自動送出」＝時間一到就直接送（一般都用這個，被 VSCode 佔用時會等你關掉後自動補送）；"
+                 "「時間到手動確認」＝時間到只提醒你，等你按下面的「立即送出」才送。",
+            style="Muted.TLabel", wraplength=900, justify="left",
+        ).grid(row=4, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(2, 0))
 
-        ttk.Label(form, text="權限模式 (選填):").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        # 權限模式
+        ttk.Label(form, text="權限模式（選填）：", style="Card.TLabel").grid(row=5, column=0, sticky="w", pady=(10, 0))
         self.perm_var = tk.StringVar(value=PERMISSION_MODES[0])
-        ttk.Combobox(
-            form, textvariable=self.perm_var, state="readonly", values=PERMISSION_MODES, width=18
-        ).grid(row=3, column=1, sticky="w", padx=6, pady=(6, 0))
-        ttk.Button(form, text="加入排程佇列", command=self._add_task).grid(row=3, column=3, sticky="e", pady=(6, 0))
+        perm_combo = ttk.Combobox(form, textvariable=self.perm_var, state="readonly",
+                                  values=PERMISSION_MODES, width=20)
+        perm_combo.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+        perm_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_perm_help())
+        self.perm_help_var = tk.StringVar()
+        ttk.Label(form, textvariable=self.perm_help_var, style="Muted.TLabel",
+                  wraplength=900, justify="left").grid(
+            row=6, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(4, 0))
 
-        queue_frame = ttk.LabelFrame(self, text="排程佇列（全部確認送出後才自動關閉）", padding=8)
-        queue_frame.pack(fill="both", expand=True, padx=10, pady=8)
-        self.queue_list = tk.Listbox(queue_frame, height=8)
-        self.queue_list.pack(fill="both", expand=True, side="left")
-        qbtns = ttk.Frame(queue_frame)
-        qbtns.pack(side="left", fill="y", padx=6)
-        ttk.Button(qbtns, text="移除選取", command=self._remove_task).pack(fill="x")
-        ttk.Button(qbtns, text="立即送出選取", command=self._send_now_selected).pack(fill="x", pady=(6, 0))
+        ttk.Button(form, text="加入排程佇列", style="Accent.TButton", command=self._add_task).grid(
+            row=7, column=1, columnspan=3, sticky="e", pady=(12, 0))
 
-        log_frame = ttk.LabelFrame(self, text="狀況 / 錯誤（--windowed 沒有主控台，訊息只會出現在這裡）", padding=8)
-        log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-        self.log_text = tk.Text(log_frame, height=8, wrap="word", state="disabled")
-        self.log_text.pack(fill="both", expand=True, side="left")
-        ttk.Scrollbar(log_frame, command=self.log_text.yview).pack(side="left", fill="y")
+        # --- 佇列 ---
+        queue_frame = self._card(outer, "③ 排程佇列")
+        queue_frame.pack(fill="both", expand=True, pady=(12, 0))
+        qtop = ttk.Frame(queue_frame, style="Card.TFrame")
+        qtop.pack(fill="both", expand=True)
+        self.queue_list = tk.Listbox(
+            qtop, height=6, activestyle="none", borderwidth=1, relief="solid",
+            highlightthickness=0, font=self._font_small, bg="#ffffff", fg=c["text"],
+            selectbackground=c["list_sel"], selectforeground=c["text"],
+        )
+        self.queue_list.pack(side="left", fill="both", expand=True)
+        qbtns = ttk.Frame(queue_frame, style="Card.TFrame")
+        qbtns.pack(fill="x", pady=(8, 0))
+        ttk.Button(qbtns, text="移除選取", command=self._remove_task).pack(side="left")
+        ttk.Button(qbtns, text="立即送出選取", command=self._send_now_selected).pack(side="left", padx=(6, 0))
+        self.autoclose_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            qbtns, text="全部確認送出後自動關閉視窗（取消勾選＝送完也不關，讓你留著看結果）",
+            variable=self.autoclose_var,
+        ).pack(side="right")
+
+        # --- 狀況 / 錯誤 ---
+        log_frame = self._card(outer, "狀況 / 錯誤（--windowed 沒有主控台，訊息只會出現在這裡）")
+        log_frame.pack(fill="both", expand=True, pady=(12, 0))
+        logwrap = ttk.Frame(log_frame, style="Card.TFrame")
+        logwrap.pack(fill="both", expand=True)
+        self.log_text = tk.Text(logwrap, height=7, wrap="word", state="disabled", borderwidth=0,
+                                highlightthickness=0, font=self._font_mono,
+                                bg=COLORS["log_bg"], fg=COLORS["log_fg"], insertbackground=COLORS["log_fg"])
+        self.log_text.pack(side="left", fill="both", expand=True)
+        lbar = ttk.Scrollbar(logwrap, command=self.log_text.yview)
+        lbar.pack(side="left", fill="y")
+        self.log_text.config(yscrollcommand=lbar.set)
 
         self.status_var = tk.StringVar(value="就緒")
-        ttk.Label(self, textvariable=self.status_var, foreground="#666").pack(anchor="w", padx=10, pady=(0, 8))
+        ttk.Label(outer, textvariable=self.status_var, style="MutedBg.TLabel").pack(
+            anchor="w", pady=(8, 0))
 
-        self._refresh_session_list()
-        self._say(f"掃到 {len(self.sessions)} 個對話。記錄檔：{LOG_PATH}")
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(1000, self._tick)
+    # -- 時間欄位（HH:MM ↔ HH:MM:SS）--
+
+    def _time_fmt(self) -> str:
+        return "%H:%M:%S" if self.seconds_var.get() else "%H:%M"
+
+    def _set_time_now(self) -> None:
+        self.time_var.set(datetime.now().strftime(self._time_fmt()))
+
+    def _bump_time(self, seconds: int) -> None:
+        try:
+            base = self._parse_time(self.time_var.get())
+        except ValueError:
+            base = datetime.now()
+        self.time_var.set((base + timedelta(seconds=seconds)).strftime(self._time_fmt()))
+
+    def _sync_time_format(self) -> None:
+        """切換「精準到秒」時，把現有的時間字串重新格式化，並補一個合理預設。"""
+        raw = self.time_var.get().strip()
+        try:
+            when = self._parse_time(raw) if raw else (datetime.now() + timedelta(minutes=5))
+        except ValueError:
+            when = datetime.now() + timedelta(minutes=5)
+        self.time_var.set(when.strftime(self._time_fmt()))
+
+    @staticmethod
+    def _parse_time(raw: str) -> datetime:
+        """接受 HH:MM 或 HH:MM:SS，回傳今天（或明天）的那個時間點。"""
+        parts = raw.strip().split(":")
+        if len(parts) == 2:
+            hh, mm, ss = int(parts[0]), int(parts[1]), 0
+        elif len(parts) == 3:
+            hh, mm, ss = int(parts[0]), int(parts[1]), int(parts[2])
+        else:
+            raise ValueError(raw)
+        if not (0 <= hh < 24 and 0 <= mm < 60 and 0 <= ss < 60):
+            raise ValueError(raw)
+        now = datetime.now()
+        when = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+        if when <= now:
+            when += timedelta(days=1)
+        return when
 
     # -- 畫面上的記錄 --
 
@@ -374,6 +681,9 @@ class App(tk.Tk):
         self.log_text.configure(state="disabled")
         _append_log(f"{_stamp()} {line}")
 
+    def _refresh_perm_help(self) -> None:
+        self.perm_help_var.set(PERMISSION_HELP.get(self.perm_var.get(), ""))
+
     # -- session list --
 
     def _refresh_session_list(self) -> None:
@@ -383,7 +693,8 @@ class App(tk.Tk):
             s for s in self.sessions if not q or q in s["cwd"].lower() or q in s["preview"].lower()
         ]
         for s in self._visible_sessions:
-            self.session_list.insert(tk.END, f"{s['last_active']} | {s['cwd']} | {s['preview']}")
+            open_tag = "  ● 開啟中" if session_holder(s["session_id"]) else ""
+            self.session_list.insert(tk.END, f"{s['last_active']} | {s['cwd']} | {s['preview']}{open_tag}")
 
     def _reload_sessions(self) -> None:
         self.sessions = scan_sessions()
@@ -395,19 +706,21 @@ class App(tk.Tk):
         return self._visible_sessions[sel[0]] if sel else None
 
     def _diagnose(self) -> None:
-        """不花錢的送出前檢查，讓使用者在預定時間之前就知道會不會失敗。"""
+        """不花錢的送出前檢查：靜態 preflight + 動態「有沒有被佔用」。"""
         session = self._selected_session()
         if session is None:
             messagebox.showwarning("尚未選擇對話", "請先在上面選一個對話", parent=self)
             return
         problems = preflight(session)
+        holder = session_holder(session["session_id"])
+        if holder:
+            problems.append(f"這個對話{describe_holder(holder)}——現在送會被鎖住而失敗，"
+                            f"請先把它關掉")
         if problems:
             for p in problems:
-                self._say(f"[檢查] 有問題：{p}")
+                self._say(f"[檢查] ✗ {p}")
         else:
-            self._say(f"[檢查] 可以送：{session['session_id']} @ {session['cwd']}")
-        self._say("[檢查] 提醒：這個對話如果正開在 VSCode 裡，--resume 會說 session 已被佔用，"
-                  "送出前請先把那個視窗關掉")
+            self._say(f"[檢查] ✓ 可以送：{session['session_id']} @ {session['cwd']}（目前沒有被佔用）")
 
     def _attach_file(self) -> None:
         path = filedialog.askopenfilename(title="選擇要附加的檔案", parent=self)
@@ -423,28 +736,28 @@ class App(tk.Tk):
             return
         prompt = self.prompt_text.get("1.0", tk.END).strip()
         if not prompt:
-            messagebox.showwarning("Prompt 是空的", "請輸入要接續送出的內容", parent=self)
+            messagebox.showwarning("內容是空的", "請輸入要接續送出的內容", parent=self)
             return
         try:
-            hh, mm = self.time_var.get().split(":")
-            when = datetime.now().replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-            if when <= datetime.now():
-                when += timedelta(days=1)
+            when = self._parse_time(self.time_var.get())
         except ValueError:
-            messagebox.showerror("時間格式錯誤", "請用 HH:MM，例如 18:41", parent=self)
+            messagebox.showerror("時間格式錯誤", "請用 HH:MM 或 HH:MM:SS，例如 18:41 或 18:41:30", parent=self)
             return
 
         task = Task(session, prompt, when, self.mode_var.get(), self.perm_var.get())
         self.tasks.append(task)
         self._refresh_queue()
-        self._say(f"已排入 {when.strftime('%m-%d %H:%M')}：{session['cwd']}（task={task.id}）")
+        self._say(f"已排入 {when.strftime('%m-%d %H:%M:%S')}：{session['cwd']}（task={task.id}）")
         for p in preflight(session):
             self._say(f"[警告] 這筆現在就有問題，時間到大概會失敗：{p}")
 
     def _refresh_queue(self) -> None:
+        sel = self.queue_list.curselection()
         self.queue_list.delete(0, tk.END)
         for t in self.tasks:
             self.queue_list.insert(tk.END, t.label())
+        if sel and sel[0] < len(self.tasks):
+            self.queue_list.selection_set(sel[0])
 
     def _remove_task(self) -> None:
         sel = self.queue_list.curselection()
@@ -457,8 +770,12 @@ class App(tk.Tk):
     def _send_now_selected(self) -> None:
         sel = self.queue_list.curselection()
         if not sel:
+            messagebox.showinfo("尚未選擇", "請先在佇列裡選一筆", parent=self)
             return
         task = self.tasks[sel[0]]
+        if task.settled:
+            self._say(f"task={task.id} 已經是最終狀態（{task.status}），不重送")
+            return
         self._fire(task, note="手動立即送出")
         self._refresh_queue()
 
@@ -466,31 +783,10 @@ class App(tk.Tk):
         self._say(f"{note}：task={task.id} → {task.session['cwd']}")
         if task.fire():
             self._say(f"已啟動 task={task.id}，盯 {CONFIRM_SECONDS} 秒確認沒有馬上失敗")
+        elif task.status == STATUS_LOCKED:
+            self._say(f"[擋下] task={task.id}：{task.error}")
         else:
             self._say(f"[失敗] task={task.id}：{task.error}")
-
-    # -- 用量閘門 --
-
-    def _quota_now(self) -> dict:
-        """查用量，30 秒內重複使用同一份結果。"""
-        if self._quota is None or time.monotonic() - self._quota_at > QUOTA_CACHE_SECONDS:
-            self._quota = usage_mod.read_usage()
-            self._quota_at = time.monotonic()
-        return self._quota
-
-    def _reset_blocking(self, now: datetime) -> tuple[bool, str]:
-        """5 小時視窗是不是還沒重置？回傳（要不要繼續等, 說明）。"""
-        quota = self._quota_now()
-        if not quota["ok"]:
-            return False, f"查不到用量（{quota['reason']}），直接送"
-        five = quota["windows"].get("five_hour")
-        if five is None or not five.get("resets_at"):
-            return False, "5 小時視窗沒在計時，可以送"
-        left = five.get("seconds_left") or 0
-        if left <= 0:
-            return False, "5 小時視窗剛重置，可以送"
-        return True, (f"5 小時視窗還有 {usage_mod.fmt_left(left)} 才重置"
-                      f"（{five['resets_local']}）")
 
     # -- timer loop --
 
@@ -498,6 +794,7 @@ class App(tk.Tk):
         if self._closing:
             return
         now = datetime.now()
+        self.clock_var.set("現在 " + now.strftime("%H:%M:%S"))
         changed = False
 
         for t in self.tasks:
@@ -509,7 +806,8 @@ class App(tk.Tk):
                     self._say(f"[完成] task={t.id} 已確認送出")
                 continue
 
-            if t.status not in (STATUS_WAITING, STATUS_HOLDING):
+            # 可以被（自動）觸發的狀態：還在等、或上次被佔用擋下。
+            if t.status not in (STATUS_WAITING, STATUS_LOCKED):
                 continue
             if now < t.when:
                 continue
@@ -519,19 +817,23 @@ class App(tk.Tk):
                 self._say(f"task={t.id} 時間到了，等你按「立即送出選取」")
                 changed = True
                 continue
+            if t.mode == "manual":
+                continue  # 手動模式被鎖住不自動補送，等使用者自己按
 
-            blocking, why = self._reset_blocking(now)
-            if blocking and now < t.hold_until:
-                if t.status != STATUS_HOLDING:
-                    t.status = STATUS_HOLDING
-                    changed = True
-                    self._say(f"task={t.id} 時間到但{why}，最多再等到 "
-                              f"{t.hold_until.strftime('%H:%M')}")
-                continue
-            if blocking:
-                self._say(f"task={t.id} 已經等滿 {WAIT_LIMIT_SECONDS // 60} 分鐘（{why}），照送")
-            self._fire(t, note="時間到，自動送出")
+            was_locked = t.status == STATUS_LOCKED
+            prev_err = t.error
+            # 時間一到就送。你設的時間就是你判斷的重置點——這裡不查用量、不壓著等。
+            fired = t.fire()
             changed = True
+            if fired:
+                self._say(f"時間到，自動送出：task={t.id} → {t.session['cwd']}")
+                self._say(f"已啟動 task={t.id}，盯 {CONFIRM_SECONDS} 秒確認沒有馬上失敗")
+            elif t.status == STATUS_LOCKED:
+                # 只在第一次、或訊息有變時說一次，免得每秒洗版。
+                if not was_locked or t.error != prev_err:
+                    self._say(f"[擋下] task={t.id}：{t.error}")
+            else:
+                self._say(f"[失敗] task={t.id}：{t.error}")
 
         if changed:
             self._refresh_queue()
@@ -544,17 +846,20 @@ class App(tk.Tk):
         if not self.tasks:
             self.status_var.set("佇列是空的，關閉視窗即可結束")
             return
-        pending = sum(1 for t in self.tasks if not t.done and t.status != STATUS_FAILED)
+        pending = sum(1 for t in self.tasks if not t.settled)
+        locked = sum(1 for t in self.tasks if t.status == STATUS_LOCKED)
         failed = sum(1 for t in self.tasks if t.status == STATUS_FAILED)
         parts = [f"待處理 {pending}"]
+        if locked:
+            parts.append(f"被佔用 {locked}（關掉 VSCode 那個對話就會自動補送）")
         if failed:
-            parts.append(f"失敗 {failed}（失敗時不會自動關閉，請看上面的訊息）")
+            parts.append(f"失敗 {failed}（不會自動關閉，請看上面的訊息）")
         self.status_var.set("｜".join(parts))
 
     def _maybe_close(self) -> None:
-        # 只有「每一筆都確認送出」才自動關閉。有任何一筆失敗就把視窗留著，
-        # 否則使用者永遠看不到失敗原因——這正是舊版最大的問題。
-        if self._closing or not self.tasks:
+        # 只有「每一筆都確認送出」且使用者允許自動關閉時才關。有任何一筆失敗就把視窗
+        # 留著，否則使用者永遠看不到失敗原因——這正是舊版最大的問題。
+        if self._closing or not self.tasks or not self.autoclose_var.get():
             return
         if all(t.done for t in self.tasks):
             self._closing = True
@@ -562,7 +867,7 @@ class App(tk.Tk):
             self.after(3000, self.destroy)
 
     def _on_close(self) -> None:
-        pending = [t for t in self.tasks if not t.done]
+        pending = [t for t in self.tasks if not t.settled]
         if pending and not messagebox.askyesno(
             "還有未送出的任務",
             f"還有 {len(pending)} 筆任務尚未確認送出，關閉後就不會執行了，確定要關閉嗎？",
