@@ -247,6 +247,85 @@ def _extract_text(content) -> str | None:
     return None
 
 
+# ---------- 讀出對話內容（給「查看內容」小視窗用，不花錢）----------
+
+def _extract_conv_text(content) -> str | None:
+    """把一則訊息壓成一段人看得懂的文字：優先取真正的文字，純工具往返就給個標記。"""
+    if isinstance(content, str):
+        return content.strip() or None
+    if not isinstance(content, list):
+        return None
+    texts: list[str] = []
+    tool_names: list[str] = []
+    has_tool_result = False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text" and block.get("text"):
+            texts.append(block["text"].strip())
+        elif btype == "tool_use" and block.get("name"):
+            tool_names.append(block["name"])
+        elif btype == "tool_result":
+            has_tool_result = True
+    if texts:
+        return "\n".join(t for t in texts if t)
+    if tool_names:
+        return "⚙ 使用工具：" + "、".join(dict.fromkeys(tool_names))
+    if has_tool_result:
+        return None  # 純工具結果，不是人看的內容，略過
+    return None
+
+
+def read_conversation(jsonl_path: str, tail: int = 120, max_lines: int = 8000) -> dict:
+    """讀出一個對話的訊息，給預覽視窗用。純讀本機檔案，不花任何 token。
+
+    為了對付很長的對話：只保留「第一則」＋「最後 tail 則」，中間用省略號帶過，
+    這樣既知道對話在談什麼、又看得到它卡在哪，記憶體也不會爆。
+    """
+    from collections import deque
+    first = None
+    recent: deque = deque(maxlen=tail)
+    total = 0
+    truncated_file = False
+    try:
+        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i >= max_lines:
+                    truncated_file = True
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                role = rec.get("type")
+                if role not in ("user", "assistant"):
+                    continue
+                text = _extract_conv_text(rec.get("message", {}).get("content"))
+                if not text:
+                    continue
+                ts = rec.get("timestamp") or ""
+                item = {"role": role, "text": text, "ts": ts}
+                if first is None:
+                    first = item
+                recent.append(item)
+                total += 1
+    except OSError as e:
+        return {"ok": False, "reason": f"讀不到對話檔：{e}", "messages": [], "total": 0}
+
+    messages = list(recent)
+    omitted = 0
+    if total > len(messages):
+        omitted = total - len(messages)
+        if first is not None:
+            messages = [first, {"role": "sep", "text": f"（中間省略 {omitted} 則）", "ts": ""}] + messages
+    return {"ok": True, "reason": "", "messages": messages, "total": total,
+            "truncated_file": truncated_file}
+
+
 # ---------- 送出前的檢查（都不花錢）----------
 
 def preflight(session: dict) -> list[str]:
@@ -411,6 +490,97 @@ class Task:
 
 # ---------- GUI ----------
 
+class ConversationViewer(tk.Toplevel):
+    """一個唯讀小視窗：把選定對話的往來內容攤開來看，避免排程時選錯對話。
+
+    只讀本機的 .jsonl，不花任何 token。開啟時捲到最底（最近的訊息），因為那通常就是
+    「被 session limit 卡住」的地方，最能幫你確認是不是要接續的那個對話。
+    """
+
+    def __init__(self, app: "App", session: dict) -> None:
+        super().__init__(app)
+        self.app = app
+        self.session = session
+        c = COLORS
+        self.title("對話內容預覽")
+        self.geometry("760x640")
+        self.minsize(520, 400)
+        self.configure(bg=c["card"])
+        self.transient(app)
+
+        head = ttk.Frame(self, style="Card.TFrame", padding=(14, 12))
+        head.pack(fill="x")
+        ttk.Label(head, text=session.get("cwd") or "(無專案路徑)", style="H2.TLabel",
+                  wraplength=700, justify="left").pack(anchor="w")
+        ttk.Label(head, text=f"session {session['session_id']}｜最後活動 {session.get('last_active', '')}",
+                  style="Muted.TLabel", wraplength=700, justify="left").pack(anchor="w", pady=(2, 0))
+        self.count_var = tk.StringVar(value="讀取中…")
+        ttk.Label(head, textvariable=self.count_var, style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+
+        body = ttk.Frame(self, style="Card.TFrame", padding=(14, 0))
+        body.pack(fill="both", expand=True)
+        self.text = tk.Text(body, wrap="word", state="disabled", borderwidth=1, relief="solid",
+                            highlightthickness=0, font=app._font_small, bg="#ffffff", fg=c["text"],
+                            padx=10, pady=8, spacing3=4)
+        self.text.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(body, command=self.text.yview)
+        sb.pack(side="left", fill="y")
+        self.text.config(yscrollcommand=sb.set)
+        # 角色樣式
+        self.text.tag_configure("role_user", foreground=c["accent"], font=app._font_h2, spacing1=8)
+        self.text.tag_configure("role_asst", foreground=c["ok"], font=app._font_h2, spacing1=8)
+        self.text.tag_configure("sep", foreground=c["muted"], justify="center", spacing1=6, spacing3=6)
+        self.text.tag_configure("meta", foreground=c["muted"], font=app._font_small)
+
+        btns = ttk.Frame(self, style="Card.TFrame", padding=(14, 12))
+        btns.pack(fill="x")
+        ttk.Button(btns, text="就選這個對話", style="Accent.TButton",
+                   command=self._choose).pack(side="right")
+        ttk.Button(btns, text="關閉", command=self.destroy).pack(side="right", padx=(0, 8))
+
+        self._load()
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def _load(self) -> None:
+        data = read_conversation(self.session["jsonl"])
+        self.text.configure(state="normal")
+        self.text.delete("1.0", tk.END)
+        if not data["ok"]:
+            self.text.insert(tk.END, data["reason"])
+            self.count_var.set("")
+            self.text.configure(state="disabled")
+            return
+        for m in data["messages"]:
+            if m["role"] == "sep":
+                self.text.insert(tk.END, f"\n{m['text']}\n\n", "sep")
+                continue
+            who = "你" if m["role"] == "user" else "Claude"
+            tag = "role_user" if m["role"] == "user" else "role_asst"
+            stamp = self._fmt_ts(m["ts"])
+            self.text.insert(tk.END, who, tag)
+            if stamp:
+                self.text.insert(tk.END, f"   {stamp}", "meta")
+            self.text.insert(tk.END, "\n")
+            self.text.insert(tk.END, m["text"].strip() + "\n")
+        self.text.configure(state="disabled")
+        self.text.see(tk.END)  # 捲到最近的訊息
+        note = "（檔案很長，只讀了前面一段）" if data.get("truncated_file") else ""
+        self.count_var.set(f"共 {data['total']} 則訊息{note}")
+
+    @staticmethod
+    def _fmt_ts(ts: str) -> str:
+        if not ts:
+            return ""
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().strftime("%m-%d %H:%M")
+        except (ValueError, TypeError):
+            return ""
+
+    def _choose(self) -> None:
+        self.app.select_session(self.session)
+        self.destroy()
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -520,6 +690,7 @@ class App(tk.Tk):
         self.filter_var.trace_add("write", lambda *a: self._refresh_session_list())
         ttk.Entry(filter_row, textvariable=self.filter_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(filter_row, text="重新整理", command=self._reload_sessions).pack(side="left")
+        ttk.Button(filter_row, text="查看內容", command=self._view_conversation).pack(side="left", padx=(6, 0))
         ttk.Button(filter_row, text="檢查可否傳送（不花錢）", command=self._diagnose).pack(side="left", padx=(6, 0))
 
         list_wrap = ttk.Frame(top, style="Card.TFrame")
@@ -530,9 +701,12 @@ class App(tk.Tk):
             selectbackground=c["list_sel"], selectforeground=c["text"],
         )
         self.session_list.pack(side="left", fill="both", expand=True)
+        self.session_list.bind("<Double-Button-1>", lambda e: self._view_conversation())
         sbar = ttk.Scrollbar(list_wrap, command=self.session_list.yview)
         sbar.pack(side="left", fill="y")
         self.session_list.config(yscrollcommand=sbar.set)
+        ttk.Label(top, text="小提示：雙擊任一列（或按「查看內容」）可先預覽對話內容，不花錢，避免選錯。",
+                  style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
 
         # --- 新增任務 ---
         form = self._card(outer, "② 排程內容")
@@ -721,6 +895,28 @@ class App(tk.Tk):
                 self._say(f"[檢查] ✗ {p}")
         else:
             self._say(f"[檢查] ✓ 可以送：{session['session_id']} @ {session['cwd']}（目前沒有被佔用）")
+
+    def _view_conversation(self) -> None:
+        """打開唯讀預覽視窗看選定對話的內容，不花錢。"""
+        session = self._selected_session()
+        if session is None:
+            messagebox.showwarning("尚未選擇對話", "請先在上面選一個對話", parent=self)
+            return
+        ConversationViewer(self, session)
+
+    def select_session(self, session: dict) -> None:
+        """從預覽視窗的「就選這個對話」回來：在清單裡把它選起來（必要時清掉篩選）。"""
+        if session not in self._visible_sessions:
+            self.filter_var.set("")
+            self._refresh_session_list()
+        try:
+            idx = self._visible_sessions.index(session)
+        except ValueError:
+            return
+        self.session_list.selection_clear(0, tk.END)
+        self.session_list.selection_set(idx)
+        self.session_list.see(idx)
+        self.session_list.activate(idx)
 
     def _attach_file(self) -> None:
         path = filedialog.askopenfilename(title="選擇要附加的檔案", parent=self)
