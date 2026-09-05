@@ -44,7 +44,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ClaudeTimerResetter"
 LOG_PATH = APP_DATA_DIR / "resumer.log"
 SESSIONS_DIR = Path.home() / ".claude" / "sessions"
@@ -535,8 +535,8 @@ class ConversationViewer(tk.Toplevel):
         self.session = session
         c = COLORS
         self.title("對話內容預覽")
-        self.geometry("760x640")
-        self.minsize(520, 400)
+        self.geometry("900x760")
+        self.minsize(620, 480)
         self.configure(bg=c["card"])
         self.transient(app)
 
@@ -618,8 +618,8 @@ class App(tk.Tk):
         super().__init__()
         self._init_scaling_and_style()
         self.title(f"Claude 對話接續排程器 v{APP_VERSION}")
-        self.geometry("960x820")
-        self.minsize(820, 720)
+        self.geometry("1140x970")
+        self.minsize(960, 840)
         self.configure(bg=COLORS["bg"])
         self._closing = False
         self.sessions = scan_sessions()
@@ -655,12 +655,12 @@ class App(tk.Tk):
 
         base = tkfont.nametofont("TkDefaultFont")
         family = "Segoe UI" if platform.system() == "Windows" else base.actual("family")
-        base.configure(family=family, size=10)
+        base.configure(family=family, size=13)
         self.option_add("*Font", base)
-        self._font_h1 = tkfont.Font(family=family, size=15, weight="bold")
-        self._font_h2 = tkfont.Font(family=family, size=11, weight="bold")
-        self._font_small = tkfont.Font(family=family, size=9)
-        self._font_mono = tkfont.Font(family="Consolas", size=9)
+        self._font_h1 = tkfont.Font(family=family, size=19, weight="bold")
+        self._font_h2 = tkfont.Font(family=family, size=14, weight="bold")
+        self._font_small = tkfont.Font(family=family, size=12)
+        self._font_mono = tkfont.Font(family="Consolas", size=12)
 
         st = ttk.Style(self)
         st.theme_use("clam")
@@ -683,11 +683,11 @@ class App(tk.Tk):
         st.configure("TCombobox", fieldbackground="#ffffff", bordercolor=c["border"])
         # 一般按鈕
         st.configure("TButton", background="#eef0f3", foreground=c["text"], borderwidth=1,
-                     bordercolor=c["border"], focuscolor=c["bg"], padding=(10, 5))
+                     bordercolor=c["border"], focuscolor=c["bg"], padding=(13, 7))
         st.map("TButton", background=[("active", "#e2e5ea"), ("pressed", "#d5d9df")])
         # 主要行動按鈕（藍）
         st.configure("Accent.TButton", background=c["accent"], foreground=c["accent_fg"],
-                     borderwidth=0, padding=(14, 6), font=self._font_h2)
+                     borderwidth=0, padding=(18, 8), font=self._font_h2)
         st.map("Accent.TButton", background=[("active", "#1d4ed8"), ("pressed", "#1e40af")])
         st.configure("Vertical.TScrollbar", background="#e2e5ea", troughcolor=c["card"],
                      bordercolor=c["card"], arrowcolor=c["muted"])
