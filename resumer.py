@@ -44,6 +44,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
+APP_VERSION = "1.0.0"
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ClaudeTimerResetter"
 LOG_PATH = APP_DATA_DIR / "resumer.log"
 SESSIONS_DIR = Path.home() / ".claude" / "sessions"
@@ -179,6 +180,37 @@ def describe_holder(holder: dict) -> str:
     where = "VSCode" if str(holder.get("entrypoint", "")).endswith("vscode") else holder.get("entrypoint", "?")
     name = f"「{holder['name']}」" if holder.get("name") else ""
     return f"目前正開在 {where}（pid {holder['pid']}）{name}"
+
+
+def force_take_over(session_id: str, timeout: float = 10.0) -> tuple[bool, str]:
+    """主動搶占：強制關掉正持有這個 session 的行程，等鎖真的釋放。
+
+    Claude Code 的鎖是「誰的行程還活著誰持有」，沒有禮貌接管的 API——要拿走只能讓
+    現在的持有者結束。所以這裡直接 taskkill 那個 pid（破壞性：那個對話在 VSCode 裡
+    沒存 / 正在跑的東西會一起沒掉），然後輪詢 session_holder() 直到回 None 才算接管
+    成功。killing 後 VSCode 擴充有可能馬上重連把 session 搶回去，所以會等到逾時；
+    逾時仍未釋放就回失敗，讓呼叫端不要硬送一次必然失敗的接續。
+    """
+    holder = session_holder(session_id)
+    if holder is None:
+        return True, "目前沒有被佔用，可直接送出"
+    pid = holder.get("pid")
+    if not pid:
+        return False, "持有者資訊沒有 pid，無法接管"
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"],
+            capture_output=True, text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except OSError as e:
+        return False, f"taskkill 失敗：{e}"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if session_holder(session_id) is None:
+            return True, f"已接管（關閉 pid {pid}）"
+        time.sleep(0.3)
+    return False, f"關了 pid {pid}，但鎖還沒釋放（可能 VSCode 又重連），請稍後再試"
 
 
 # ---------- 掃描本機所有 Claude Code 對話 ----------
@@ -585,7 +617,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self._init_scaling_and_style()
-        self.title("Claude 對話接續排程器")
+        self.title(f"Claude 對話接續排程器 v{APP_VERSION}")
         self.geometry("960x820")
         self.minsize(820, 720)
         self.configure(bg=COLORS["bg"])
@@ -780,6 +812,7 @@ class App(tk.Tk):
         qbtns.pack(fill="x", pady=(8, 0))
         ttk.Button(qbtns, text="移除選取", command=self._remove_task).pack(side="left")
         ttk.Button(qbtns, text="立即送出選取", command=self._send_now_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(qbtns, text="強制接管並送出", command=self._force_take_over_selected).pack(side="left", padx=(6, 0))
         self.autoclose_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             qbtns, text="全部確認送出後自動關閉視窗（取消勾選＝送完也不關，讓你留著看結果）",
@@ -973,6 +1006,35 @@ class App(tk.Tk):
             self._say(f"task={task.id} 已經是最終狀態（{task.status}），不重送")
             return
         self._fire(task, note="手動立即送出")
+        self._refresh_queue()
+
+    def _force_take_over_selected(self) -> None:
+        """主動搶占選取任務的 session：關掉持有它的行程後再送出。破壞性，先跳確認。"""
+        sel = self.queue_list.curselection()
+        if not sel:
+            messagebox.showinfo("尚未選擇", "請先在佇列裡選一筆", parent=self)
+            return
+        task = self.tasks[sel[0]]
+        if task.settled:
+            self._say(f"task={task.id} 已經是最終狀態（{task.status}），不重送")
+            return
+        holder = session_holder(task.session["session_id"])
+        if holder is None:
+            self._fire(task, note="強制接管（其實沒被佔用，直接送）")
+            self._refresh_queue()
+            return
+        if not messagebox.askyesno(
+            "確認強制接管",
+            f"這個對話{describe_holder(holder)}。\n\n"
+            f"強制接管會直接關閉那個行程（pid {holder['pid']}），"
+            f"它裡面沒存或正在跑的東西會一起遺失。\n\n確定要接管並送出嗎？",
+            parent=self,
+        ):
+            return
+        ok, msg = force_take_over(task.session["session_id"])
+        self._say(f"[接管] task={task.id}：{msg}")
+        if ok:
+            self._fire(task, note="接管後送出")
         self._refresh_queue()
 
     def _fire(self, task: Task, *, note: str) -> None:

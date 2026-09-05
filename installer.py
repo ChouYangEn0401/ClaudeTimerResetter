@@ -25,6 +25,7 @@ import rules as rules_mod
 import scheduler
 
 APP_NAME = "ClaudeTimerResetter"
+APP_VERSION = "1.0.0"
 
 
 # ---------- 共用路徑/工具函式 ----------
@@ -162,7 +163,7 @@ def apply_install(rule_list: list[dict], mode: str, auto_start: bool) -> None:
     if mode == "scheduler":
         autostart.disable()
         _kill_running_tray()
-        scheduler.install_task(str(dest))
+        scheduler.install_task(str(dest), rule_list)
     else:
         scheduler.uninstall_task()
         _kill_running_tray()
@@ -311,7 +312,7 @@ class RuleDialog(tk.Toplevel):
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("ClaudeTimerResetter 安裝器")
+        self.title(f"ClaudeTimerResetter 安裝器 v{APP_VERSION}")
         self.geometry("560x600")
         self.rule_list: list[dict] = rules_mod.load_rules(rules_path())
 
