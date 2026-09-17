@@ -5,18 +5,17 @@
     build.bat          兩支都建
     build.bat resumer  只建這一支
 
-跟 ClaudeTimerResetter.exe 是刻意分開的兩支 exe（見 README「設計理念」），所以打包
-設定也分成兩份 spec，不共用；這支不需要 pystray（沒有工具列常駐模式）。
+入口是根目錄的 resumer.py（轉接到 claude_timer.resumer.app）。跟
+ClaudeTimerResetter.exe 是刻意分開的兩支 exe（見 docs/design.md），所以打包設定也分成
+兩份 spec，不共用；這支不需要 pystray（沒有工具列常駐模式），排掉可以少幾 MB。
 """
 import os
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 
-# claude_subscription 在 resumer._claude_binary() 裡才 import，usage 則是模組層 import。
-# 明列出來的理由同 ClaudeTimerResetter.spec：--windowed 沒有主控台，漏掉會很難追。
+# claude_subscription 在 tasks.claude_binary() 裡才 import，靜態分析看不到，明列出來。
 HIDDEN = [
     "claude_subscription",
-    "usage",
 ]
 
 a = Analysis(

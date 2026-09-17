@@ -23,7 +23,7 @@
 有打的話一次大約 $0.00025、4~7 秒。
 
 用法：
-    test.bat                （或）  .venv\\Scripts\\python ping.py
+    test.bat                （或）  .venv\\Scripts\\python -m claude_timer.core.ping
     test.bat --json         機器可讀輸出
     test.bat --force        不看用量，一定打（等於舊版的無條件行為）
     test.bat --no-wait      該等的時候不原地等，直接結束（排程用）
@@ -40,7 +40,7 @@ import os
 import sys
 import time
 
-import usage as usage_mod
+from . import usage as usage_mod
 
 # thinking 關掉：這支只是要一個 "k"，不需要模型多想
 os.environ.setdefault("MAX_THINKING_TOKENS", "0")
@@ -198,7 +198,7 @@ def refresh(
 
 
 def summarize(result: dict) -> str:
-    """壓成一行給 log 用（installer/tray 的 tick 都會寫這行）。"""
+    """壓成一行給 log 用（排程與工具列常駐的 tick 都會寫這行）。"""
     action = result["action"]
     if action == "refreshed" and result["probe"] and result["probe"]["ok"]:
         return f"已刷新 ${result['probe']['cost_usd']:.5f}｜{result['reason']}"

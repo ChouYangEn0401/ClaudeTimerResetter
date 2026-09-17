@@ -21,5 +21,5 @@ if not exist ".venv\Scripts\python.exe" (
     call "%~dp0setup.bat" || exit /b 4
 )
 
-".venv\Scripts\python.exe" ping.py %*
+".venv\Scripts\python.exe" -m claude_timer.core.ping %*
 exit /b %ERRORLEVEL%

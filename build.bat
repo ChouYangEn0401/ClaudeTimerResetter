@@ -3,8 +3,10 @@ REM ===================================================================
 REM  build.bat - build the two exes from a fresh clone, anywhere.
 REM
 REM    build.bat              build both
-REM    build.bat installer    build ClaudeTimerResetter.exe only
+REM    build.bat resetter     build ClaudeTimerResetter.exe only
 REM    build.bat resumer      build ClaudeResumer.exe only
+REM
+REM  ("installer" still works as an alias for "resetter".)
 REM
 REM  Does everything from scratch: creates .venv, installs runtime deps
 REM  (requirements.txt) and build deps (requirements-build.txt), then
@@ -20,8 +22,9 @@ cd /d "%~dp0"
 
 set TARGET=%~1
 if "%TARGET%"=="" set TARGET=all
-if /i not "%TARGET%"=="all" if /i not "%TARGET%"=="installer" if /i not "%TARGET%"=="resumer" (
-    echo [X] unknown target "%TARGET%" - use: all ^| installer ^| resumer
+if /i "%TARGET%"=="installer" set TARGET=resetter
+if /i not "%TARGET%"=="all" if /i not "%TARGET%"=="resetter" if /i not "%TARGET%"=="resumer" (
+    echo [X] unknown target "%TARGET%" - use: all ^| resetter ^| resumer
     exit /b 4
 )
 
@@ -37,7 +40,7 @@ if /i not "%TARGET%"=="resumer" (
         --distpath dist --workpath build ^
         packaging\ClaudeTimerResetter.spec || exit /b 1
 )
-if /i not "%TARGET%"=="installer" (
+if /i not "%TARGET%"=="resetter" (
     ".venv\Scripts\python.exe" -m PyInstaller --noconfirm ^
         --distpath dist --workpath build ^
         packaging\ClaudeResumer.spec || exit /b 1

@@ -18,5 +18,5 @@ if not exist ".venv\Scripts\python.exe" (
     call "%~dp0setup.bat" || exit /b 4
 )
 
-".venv\Scripts\python.exe" usage.py %*
+".venv\Scripts\python.exe" -m claude_timer.core.usage %*
 exit /b %ERRORLEVEL%

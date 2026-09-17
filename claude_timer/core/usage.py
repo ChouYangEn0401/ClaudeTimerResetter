@@ -11,8 +11,8 @@
 不經過模型，所以完全不計費。
 
 用法：
-    usage.bat                （或）  .venv\\Scripts\\python usage.py
-    .venv\\Scripts\\python usage.py --json     機器可讀輸出
+    usage.bat                （或）  .venv\\Scripts\\python -m claude_timer.core.usage
+    .venv\\Scripts\\python -m claude_timer.core.usage --json     機器可讀輸出
 
 結束碼（沿用 ping.py 的契約）：
     0 讀到了 / 1 讀取失敗（網路、伺服器）/ 3 未登入或 token 過期 / 4 環境不對

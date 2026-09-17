@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec：ClaudeTimerResetter.exe（背景排程 + 探針）。
+"""PyInstaller spec：ClaudeTimerResetter.exe（提前重置排程器：主控台 + 背景 tick）。
 
 用 build.bat 跑，不要直接叫 pyinstaller——build.bat 會先把 .venv 跟建置相依裝好。
     build.bat            兩支都建
-    build.bat installer  只建這一支
+    build.bat resetter   只建這一支
+
+入口是根目錄的 resetter.py（轉接到 claude_timer.resetter.app）。claude_timer 套件
+本身走一般的 import，PyInstaller 靜態分析抓得到，所以 HIDDEN 只放它看不出來的那幾個。
 
 刻意寫成 checked-in 的 spec 而不是一長串命令列參數，理由是：換一台電腦 clone 下來
 之後，打包設定跟原始碼是同一份、同一個 commit，不會發生「他那台建出來的 exe 少了
@@ -13,22 +16,16 @@ import os
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 
-# ping.py 裡 claude_subscription 是「用到才 import」（放在函式內），resumer/ping 之間
-# 也是同目錄 import。PyInstaller 靜態分析抓得到，但這裡明列出來當保險：這幾個名字掉了
-# 的話，exe 要到執行時才會炸，而 --windowed 沒有主控台，錯誤訊息會很難追。
+# 靜態分析看不出來的 import：claude_subscription 是「用到才 import」（寫在函式內），
+# pystray 的後端則是執行期才決定。這兩個掉了的話，exe 要到執行時才炸，而 --windowed
+# 沒有主控台，錯誤訊息會很難追。
 HIDDEN = [
     "claude_subscription",
-    "usage",
-    "ping",
-    "rules",
-    "scheduler",
-    "autostart",
-    "tray",
-    "pystray._win32",   # pystray 靠執行期挑後端，靜態分析看不出來要哪一個
+    "pystray._win32",
 ]
 
 a = Analysis(
-    [os.path.join(ROOT, "installer.py")],
+    [os.path.join(ROOT, "resetter.py")],
     pathex=[ROOT],
     binaries=[],
     datas=[],

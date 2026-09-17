@@ -2,7 +2,7 @@
 """scheduler.py — Windows 工作排程器 (Task Scheduler) 包裝。
 
 註冊的工作只做一件事：到點就跑一次 `<exe> --tick`。要不要真的打探針、打哪一條
-規則，交給 rules.compute_due()（installer.py 的 --tick 進入點）決定，這裡不需要懂
+規則，交給 rules.compute_due()（resetter.service 的 --tick 進入點）決定，這裡不需要懂
 規則的細節。
 
 觸發方式：優先照 rules.json 裡 daily_times 的時間點，替每個時間排一個「每天固定
@@ -14,7 +14,7 @@
 若規則裡沒有任何 daily_times（例如只有 interval / burst 這種需要細密輪詢的），才
 退回舊的「每 1 分鐘」TimeTrigger，確保那些規則仍能被準時判定。
 
-沿用專案踩過的教訓（README 提過 cmd.exe 用 cp950 讀 .bat 會爛掉）：判斷工作是否
+沿用專案踩過的教訓（docs/build.md 提過 cmd.exe 用 cp950 讀 .bat 會爛掉）：判斷工作是否
 存在只看 `schtasks` 的 return code，不解析任何在地化文字輸出。
 """
 from __future__ import annotations
