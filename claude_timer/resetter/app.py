@@ -348,7 +348,7 @@ class App(tk.Tk):
         if not service.is_frozen():
             messagebox.showerror(
                 "開發模式",
-                "現在是用原始碼跑的，安裝需要 exe。\n請先執行 build.bat 打包成 exe 再安裝。",
+                "現在是用原始碼跑的，安裝需要 exe。\n請先執行 scripts\\build.bat 打包成 exe 再安裝。",
                 parent=self)
             return
         try:

@@ -2,11 +2,13 @@
 REM ===================================================================
 REM  build.bat - build the two exes from a fresh clone, anywhere.
 REM
-REM    build.bat              build both
-REM    build.bat resetter     build ClaudeTimerResetter.exe only
-REM    build.bat resumer      build ClaudeResumer.exe only
+REM    scripts\build.bat              build both
+REM    scripts\build.bat resetter     build ClaudeTimerResetter.exe only
+REM    scripts\build.bat resumer      build ClaudeResumer.exe only
 REM
 REM  ("installer" still works as an alias for "resetter".)
+REM  Prefer double-clicking? scripts\build-resetter.bat and
+REM  scripts\build-resumer.bat call this with the target pre-filled.
 REM
 REM  Does everything from scratch: creates .venv, installs runtime deps
 REM  (requirements.txt) and build deps (requirements-build.txt), then
@@ -18,7 +20,7 @@ REM  NOTE: keep this file ASCII-only. cmd.exe reads .bat in the OEM
 REM        codepage (cp950 here), so non-ASCII text corrupts the script.
 REM ===================================================================
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set TARGET=%~1
 if "%TARGET%"=="" set TARGET=all

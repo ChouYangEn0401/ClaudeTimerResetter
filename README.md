@@ -30,7 +30,7 @@
 ```bat
 git clone https://github.com/ChouYangEn0401/ClaudeTimerResetter.git
 cd ClaudeTimerResetter
-build.bat
+scripts\build.bat
 ```
 
 跑完 `dist\` 裡會有兩個檔案，複製到任何一台 Windows 都能雙擊執行：
@@ -40,10 +40,13 @@ build.bat
 - `ClaudeResumer.exe` — 被卡住的當下雙擊打開，挑對話、填時間、加入佇列。
   用完關掉，不常駐、不需要安裝。詳見 [docs/resumer.md](docs/resumer.md)
 
+只想單獨建其中一支、用雙擊就好，不想打指令：`scripts\build-resetter.bat`、
+`scripts\build-resumer.bat`。
+
 ### 想改程式 → 從原始碼跑
 
 ```bat
-setup.bat                                  :: 只需跑一次：建 .venv、裝相依
+scripts\setup.bat                          :: 只需跑一次：建 .venv、裝相依
 .venv\Scripts\python resetter.py           :: 開 resetter 主控台
 .venv\Scripts\python resumer.py            :: 開 resumer
 ```
@@ -51,11 +54,11 @@ setup.bat                                  :: 只需跑一次：建 .venv、裝�
 另外兩個命令列工具（不需要 GUI）：
 
 ```bat
-usage.bat        :: 現在用掉多少額度、幾點重置。一定不花錢（純 HTTPS GET，不經過模型）
-test.bat         :: 該刷新就刷新一次，不該刷新就不打。跟排程走完全同一條路
+scripts\usage.bat        :: 現在用掉多少額度、幾點重置。一定不花錢（純 HTTPS GET，不經過模型）
+scripts\test.bat         :: 該刷新就刷新一次，不該刷新就不打。跟排程走完全同一條路
 ```
 
-兩個 `.bat` 發現沒有 `.venv` 都會自己叫 `setup.bat`，第一次直接跑也行。
+`scripts\` 底下的 `.bat` 發現沒有 `.venv` 都會自己叫 `setup.bat`，第一次直接跑也行。
 參數與結束碼見 [docs/resetter.md](docs/resetter.md#命令列工具)。
 
 ---
@@ -84,7 +87,7 @@ claude_timer/
               viewer（內容預覽）、tasks（一筆接續任務）
 packaging/    兩份手寫的 PyInstaller spec（進版控，理由見 docs/build.md）
 docs/         說明文件
-*.bat         setup / test / usage / build
+scripts/      setup / test / usage / build（含雙擊用的 build-resetter / build-resumer）
 ```
 
 設定與紀錄統一放 `%LOCALAPPDATA%\ClaudeTimerResetter\`（規則、狀態、執行紀錄），

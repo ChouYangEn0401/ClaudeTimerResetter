@@ -82,7 +82,7 @@ def preflight(session: SessionInfo) -> list[str]:
     try:
         claude_binary()
     except ImportError as e:
-        problems.append(f"找不到 claude_subscription 套件（先跑 setup.bat）：{e}")
+        problems.append(f"找不到 claude_subscription 套件（先跑 scripts\\setup.bat）：{e}")
     except Exception as e:  # ClaudeNotFoundError 等；這裡不該讓 GUI 整個掛掉
         problems.append(f"找不到 claude 執行檔：{e}")
 

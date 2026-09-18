@@ -69,7 +69,7 @@ Claude 的額度是 5 小時一個視窗。重度工作常常 2~3 小時就把�
   清完把你當初下載／建置的那份 exe 刪掉，系統上就不會留下任何東西。
 
 > 從原始碼跑的時候按「安裝」會被擋下來：安裝需要 exe（要有東西可以複製過去、
-> 給排程器呼叫）。先跑 `build.bat`。
+> 給排程器呼叫）。先跑 `scripts\build.bat`。
 
 ---
 
@@ -90,17 +90,17 @@ Claude 的額度是 5 小時一個視窗。重度工作常常 2~3 小時就把�
 
 ## 命令列工具
 
-不想開 GUI 的話，這兩個 `.bat` 是同一套核心的命令列版本：
+不想開 GUI 的話，`scripts\` 底下這兩個 `.bat` 是同一套核心的命令列版本：
 
 ```bat
-usage.bat               :: 只看用量跟重置時間，一定不花錢
-usage.bat --json        :: 機器可讀
+scripts\usage.bat               :: 只看用量跟重置時間，一定不花錢
+scripts\usage.bat --json        :: 機器可讀
 
-test.bat                :: 該刷新就刷新，不該刷新就不花錢
-test.bat --json         :: 機器可讀
-test.bat --force        :: 不看用量，一定打
-test.bat --no-wait      :: 該等的時候不原地等，直接結束（排程用）
-test.bat --max-wait 300 :: 最多原地等 300 秒（預設 920）
+scripts\test.bat                :: 該刷新就刷新，不該刷新就不花錢
+scripts\test.bat --json         :: 機器可讀
+scripts\test.bat --force        :: 不看用量，一定打
+scripts\test.bat --no-wait      :: 該等的時候不原地等，直接結束（排程用）
+scripts\test.bat --max-wait 300 :: 最多原地等 300 秒（預設 920）
 ```
 
 `usage.bat` 為什麼不花錢：它打的是 Claude Code 自己 `/usage` 用的那支端點
@@ -115,7 +115,7 @@ test.bat --max-wait 300 :: 最多原地等 300 秒（預設 920）
 | 1 | 呼叫失敗（額度用完 / 逾時 / 模型錯誤） | 可以重試 |
 | 2 | 找不到 `claude` 執行檔 | 裝官方 Claude Code |
 | 3 | 未登入 / 認證失敗 | 執行 `claude` 登入 |
-| 4 | 環境沒裝好 | 跑 `setup.bat` |
+| 4 | 環境沒裝好 | 跑 `scripts\setup.bat` |
 
 「沒刷新」不是錯誤：`--json` 的 `action` 欄位會是 `refreshed` / `skipped` / `waiting`
 三者之一，三種都回結束碼 0。要區分「有沒有真的打」請讀 `action`，不要讀結束碼。
@@ -126,8 +126,8 @@ test.bat --max-wait 300 :: 最多原地等 300 秒（預設 920）
 
 | 現象 | 多半是 | 怎麼辦 |
 |---|---|---|
-| 按「安裝」跳「開發模式」 | 現在是用原始碼跑的 | 先 `build.bat`，用 `dist\ClaudeTimerResetter.exe` 安裝 |
-| 紀錄一直是 `[SKIP]` | 正常。視窗已經在跑，這次不打才對 | 想確認真的會打，可以用 `test.bat --force`（會花 $0.00025） |
+| 按「安裝」跳「開發模式」 | 現在是用原始碼跑的 | 先 `scripts\build.bat`，用 `dist\ClaudeTimerResetter.exe` 安裝 |
+| 紀錄一直是 `[SKIP]` | 正常。視窗已經在跑，這次不打才對 | 想確認真的會打，可以用 `scripts\test.bat --force`（會花 $0.00025） |
 | 紀錄出現 `[WAIT]` | 觸發時剛好接近重置點 | 正常，下一輪 tick 會重新判定 |
 | 紀錄出現 `exit 3` / 未登入 | OAuth token 過期 | 開一次 Claude Code，它會自動換新 |
 | 完全沒有紀錄 | 排程沒裝成功，或裝的是常駐模式但沒在跑 | 主控台上方「目前狀態」會直接寫現在裝的是哪一種 |

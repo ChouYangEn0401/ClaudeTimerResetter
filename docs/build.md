@@ -3,40 +3,42 @@
 ## 需要什麼
 
 Windows、Python 3.10 以上、`py` 指令叫得到。就這兩個——不需要事先裝 pyinstaller，
-也不需要先跑 `setup.bat`。
+也不需要先跑 `scripts\setup.bat`。
 
 ## 建 exe
 
 ```bat
 git clone https://github.com/ChouYangEn0401/ClaudeTimerResetter.git
 cd ClaudeTimerResetter
-build.bat
+scripts\build.bat
 ```
 
-`build.bat` 自己會做完三件事：建 `.venv` 並裝 `requirements.txt`（執行期相依）→ 裝
+`scripts\build.bat` 自己會做完三件事：建 `.venv` 並裝 `requirements.txt`（執行期相依）→ 裝
 `requirements-build.txt`（只有建置才需要的 pyinstaller / pystray / pillow）→ 用
 `packaging\` 底下的 spec 跑 PyInstaller。
 
-只建其中一支：
+只建其中一支、要打參數：
 
 ```bat
-build.bat resetter     :: 只建 dist\ClaudeTimerResetter.exe
-build.bat resumer      :: 只建 dist\ClaudeResumer.exe
+scripts\build.bat resetter     :: 只建 dist\ClaudeTimerResetter.exe
+scripts\build.bat resumer      :: 只建 dist\ClaudeResumer.exe
 ```
 
-（`build.bat installer` 仍然可以用，是 `resetter` 的別名。舊的
-`build_installer.bat` / `build_resumer.bat` 兩個轉呼叫用的檔案已經移除。）
+不想打指令、雙擊就好：`scripts\build-resetter.bat`、`scripts\build-resumer.bat`
+（各自帶好參數呼叫 `build.bat`，效果跟上面完全一樣）。
+
+（`build.bat installer` 仍然可以用，是 `resetter` 的別名，保留給還在用舊叫法的人。）
 
 ## 從原始碼跑
 
 ```bat
-setup.bat                                   :: 只需跑一次
+scripts\setup.bat                           :: 只需跑一次
 .venv\Scripts\python resetter.py            :: resetter 主控台
 .venv\Scripts\python resetter.py --tick     :: 排程用的靜默進入點（手動跑只為除錯）
 .venv\Scripts\python resetter.py --tray     :: 工具列常駐
 .venv\Scripts\python resumer.py             :: resumer（沒有參數）
-.venv\Scripts\python -m claude_timer.core.usage    :: 等同 usage.bat
-.venv\Scripts\python -m claude_timer.core.ping     :: 等同 test.bat
+.venv\Scripts\python -m claude_timer.core.usage    :: 等同 scripts\usage.bat
+.venv\Scripts\python -m claude_timer.core.ping     :: 等同 scripts\test.bat
 ```
 
 功能跟 exe 完全一樣——exe 只是把 Python 跟相依包進去，讓沒裝 Python 的電腦也能用。

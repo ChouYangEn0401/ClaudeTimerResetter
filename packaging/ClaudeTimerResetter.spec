@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec：ClaudeTimerResetter.exe（提前重置排程器：主控台 + 背景 tick）。
 
-用 build.bat 跑，不要直接叫 pyinstaller——build.bat 會先把 .venv 跟建置相依裝好。
-    build.bat            兩支都建
-    build.bat resetter   只建這一支
+用 scripts\build.bat 跑，不要直接叫 pyinstaller——build.bat 會先把 .venv 跟建置相依裝好。
+    scripts\build.bat            兩支都建
+    scripts\build.bat resetter   只建這一支
 
 入口是根目錄的 resetter.py（轉接到 claude_timer.resetter.app）。claude_timer 套件
 本身走一般的 import，PyInstaller 靜態分析抓得到，所以 HIDDEN 只放它看不出來的那幾個。

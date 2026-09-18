@@ -23,11 +23,11 @@
 有打的話一次大約 $0.00025、4~7 秒。
 
 用法：
-    test.bat                （或）  .venv\\Scripts\\python -m claude_timer.core.ping
-    test.bat --json         機器可讀輸出
-    test.bat --force        不看用量，一定打（等於舊版的無條件行為）
-    test.bat --no-wait      該等的時候不原地等，直接結束（排程用）
-    test.bat --max-wait N   最多原地等 N 秒（預設 920＝15 分鐘再多一點點）
+    scripts\\test.bat                （或）  .venv\\Scripts\\python -m claude_timer.core.ping
+    scripts\\test.bat --json         機器可讀輸出
+    scripts\\test.bat --force        不看用量，一定打（等於舊版的無條件行為）
+    scripts\\test.bat --no-wait      該等的時候不原地等，直接結束（排程用）
+    scripts\\test.bat --max-wait N   最多原地等 N 秒（預設 920＝15 分鐘再多一點點）
 
 結束碼（沿用 claude_subscription 的契約，方便排程/腳本判斷）：
     0 沒問題（含「不用打」跟「還在等」）/ 1 呼叫失敗（額度、逾時）

@@ -14,7 +14,7 @@ REM  NOTE: keep this file ASCII-only. cmd.exe reads .bat in the OEM
 REM        codepage (cp950 here), so non-ASCII text corrupts the script.
 REM ===================================================================
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 if not exist ".venv\Scripts\python.exe" (
     echo [!] no .venv found - creating it ...

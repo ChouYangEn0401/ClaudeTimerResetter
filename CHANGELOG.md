@@ -1,5 +1,19 @@
 # 更動記錄
 
+## v1.1.1
+
+**bat 檔**
+- 四個 `.bat`（`setup` / `build` / `test` / `usage`）搬進 `scripts/`，根目錄只留原始碼
+  跟進入點，跟一般開源專案把建置腳本收進 `scripts/`、根目錄放程式碼的慣例一致。
+- 補回雙擊建置單一 exe 的捷徑：`scripts/build-resetter.bat`、`scripts/build-resumer.bat`
+  （v1.1.0 把舊的 `build_installer.bat` / `build_resumer.bat` 直接刪掉，這次照原本
+  「先跑 setup、再跑 build」的慣例補回來，只是換了資料夾跟名字）。
+- 所有文件與程式內的 `.bat` 路徑提示同步改成 `scripts\xxx.bat`。
+
+**文件**
+- `docs/design.md` 重新分節：「架構決策」（現在仍成立、改動前要先看）跟「踩過的坑」
+  （已修好的歷史問題）分開，不再是一路排下來的問答集。
+
 ## v1.1.0
 
 **畫面**

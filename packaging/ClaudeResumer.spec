@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec：ClaudeResumer.exe（一次性的對話接續排程器）。
 
-用 build.bat 跑，不要直接叫 pyinstaller。
-    build.bat          兩支都建
-    build.bat resumer  只建這一支
+用 scripts\build.bat 跑，不要直接叫 pyinstaller。
+    scripts\build.bat          兩支都建
+    scripts\build.bat resumer  只建這一支
 
 入口是根目錄的 resumer.py（轉接到 claude_timer.resumer.app）。跟
 ClaudeTimerResetter.exe 是刻意分開的兩支 exe（見 docs/design.md），所以打包設定也分成
