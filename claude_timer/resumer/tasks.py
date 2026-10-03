@@ -26,6 +26,7 @@ from pathlib import Path
 
 from ..paths import ensure_install_dir, resume_task_log
 from . import journal
+from .launch import CONFIRM_SECONDS, build_argv, claude_prefix, start_detached
 from .sessions import SessionInfo, describe_holder, session_holder
 
 PERMISSION_MODES = ["(不覆寫)", "acceptEdits", "bypassPermissions", "dontAsk", "plan"]
@@ -56,8 +57,7 @@ PERMISSION_HELP = {
     ),
 }
 
-# 送出後盯著子行程這麼久；這段時間內就死掉的視為失敗（錯誤才有機會被看到）。
-CONFIRM_SECONDS = 60
+# 送出後盯著子行程 CONFIRM_SECONDS 秒（launch.py）；這段時間內就死掉的視為失敗（錯誤才有機會被看到）。
 
 STATUS_WAITING = "等待中"
 STATUS_MANUAL = "時間到，等你確認"
@@ -68,8 +68,8 @@ STATUS_FAILED = "失敗"
 
 
 def claude_binary() -> str:
-    from claude_subscription import find_claude_binary
-    return find_claude_binary()
+    """找得到 claude 嗎？（CLAUDE_TIMER_CLAUDE_BIN 有設就用它，測試用。）"""
+    return claude_prefix()[-1]
 
 
 def preflight(session: SessionInfo) -> list[str]:
@@ -152,40 +152,17 @@ class Task:
             return False
 
         try:
-            exe = claude_binary()
+            args = build_argv(self.prompt, resume=self.session.session_id, permission_mode=self.permission_mode)
         except Exception as e:
             self._fail(f"取得 claude 執行檔失敗：{e}")
             return False
-
-        args = [exe, "--resume", self.session.session_id, "--print", self.prompt]
-        if self.permission_mode and self.permission_mode != PERMISSION_MODES[0]:
-            args += ["--permission-mode", self.permission_mode]
-
         ensure_install_dir()
         try:
-            log = open(self.log_path, "w", encoding="utf-8")
+            # 一定要在該對話自己的專案資料夾裡跑；送出的是獨立行程（launch.py）
+            self.proc = start_detached(args, self.session.cwd, self.log_path)
         except OSError as e:
-            self._fail(f"開不了記錄檔 {self.log_path}：{e}")
-            return False
-        try:
-            self.proc = subprocess.Popen(
-                args,
-                cwd=self.session.cwd,          # 一定要在該對話自己的專案資料夾裡跑
-                # DETACHED_PROCESS 之下沒有主控台，stdin 若用繼承的會是無效 handle。
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-                close_fds=True,
-            )
-        except OSError as e:
-            log.close()
             self._fail(f"啟動 claude 失敗：{e}")
             return False
-        finally:
-            # 子行程已經拿到自己的 handle，這邊留著只會擋住之後讀 log。
-            if not log.closed:
-                log.close()
 
         self.status = STATUS_SENDING
         self.error = None

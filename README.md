@@ -6,11 +6,12 @@
 |---|---|---|
 | **ClaudeTimerResetter**（resetter） | 工作到一半額度用完，只能乾等視窗重置 | 在你**預期會重度使用之前**，先打一次最便宜的探針（約 $0.00025），把 5 小時額度視窗的重置時鐘**提早啟動** |
 | **ClaudeResumer**（resumer） | 某個對話被 session limit 卡住，要守在電腦前等它恢復 | 你告訴它幾點恢復，**時間一到自動把那個對話接著送出去**，送完自己關掉 |
+| **ClaudeResumer CLI**（`scripts\ctr.bat`） | 想讓別的程式（ClawBot、agent、腳本）也能排接續，或在專案**開新對話**做新任務 | 不開視窗的命令列版，排程交給 Windows 工作排程器；見 [docs/cli.md](docs/cli.md) |
 
 兩支是**獨立的 exe**、各自獨立使用，沒有先後關係，也不需要都裝。
 為什麼分成兩支而不是一個工具兩個分頁 → [docs/design.md](docs/design.md)。
 
-目前版本 **v1.1.0**（更動見 [CHANGELOG.md](CHANGELOG.md)）。
+目前版本 **v1.2.0**（更動見 [CHANGELOG.md](CHANGELOG.md)）。
 
 ---
 

@@ -1,5 +1,18 @@
 # 更動記錄
 
+## v1.2.0
+
+**ClaudeResumer 命令列版（`python -m claude_timer.cli`、`scripts\ctr.bat`）**
+- 子指令：`sessions`、`show`、`check`、`resume`、`new`、`jobs`、`job`、`cancel`、`stash`、`fire`，都有 `--json`，
+  結束碼寫成契約（0／1／2／3／4）。說明在 `docs/cli.md`，給 agent 讀的在 `skills/claude-resumer/SKILL.md`。
+- **`new`：在專案開一個全新的對話做新任務**（以前 resumer 只能接舊對話）。新的 session id 先決定好，之後可以再接。
+- 排程不靠視窗開著：每筆 job 一個一次性的 Windows 工作排程 `ClaudeResumer-<id>`；被佔用每 2 分鐘補試、最多 1 小時；
+  電腦那時是關的，開機後補跑。job 存在 `%LOCALAPPDATA%\ClaudeTimerResetteresume_jobs.json`。
+- 跑的時候能碰到什麼：內容釘死（content_hash 不一樣就不跑）；`new` 預設在獨立 git worktree＋branch 跑；
+  `resume` 預設要求工作目錄乾淨並記下起點 commit，`job` 看得到改動、`stash` 收得回來；工具限制與預算原樣交給 claude。
+- 送出的邏輯抽成 `claude_timer/resumer/launch.py`，視窗版和命令列版共用同一份。
+- 新增 `tests/test_cli.py`（假的 claude、暫存資料夾，不碰工作排程器）。
+
 ## v1.1.1
 
 **bat 檔**

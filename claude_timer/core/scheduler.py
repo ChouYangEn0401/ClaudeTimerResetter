@@ -135,3 +135,81 @@ def install_task(exe_path: str, rule_list: list[dict] | None = None) -> None:
 def uninstall_task() -> None:
     if task_exists():
         _run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"])
+
+
+# ── ClaudeResumer 的一次性任務（CLI 的 resume／new --at；2026-10-03）──────────────
+#
+# 每一筆排好的 job 一個工作：ClaudeResumer-<id>，到點跑一次 `python -m claude_timer.cli fire <id>`。
+# 對話被佔用時 fire 會退回「waiting」，靠工作本身的重複觸發每 2 分鐘補試、最多 1 小時；送出成功 fire 會把
+# 這個工作刪掉。StartWhenAvailable：電腦在那個時間是關的，開機後會補跑。不需要任何視窗或 bot 開著。
+
+ONCE_PREFIX = "ClaudeResumer-"
+
+_ONCE_XML = """<?xml version="1.0" encoding="UTF-16"?>
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>ClaudeResumer job {job_id} - fire once (retries every 2 min for 1 h while the session is busy)</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <StartBoundary>{start}</StartBoundary>
+      <Enabled>true</Enabled>
+      <Repetition><Interval>PT2M</Interval><Duration>PT60M</Duration><StopAtDurationEnd>true</StopAtDurationEnd></Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Settings>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Actions>
+    <Exec>
+      <Command>{python}</Command>
+      <Arguments>-m claude_timer.cli fire {job_id}</Arguments>
+      <WorkingDirectory>{workdir}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def once_task_name(job_id: str) -> str:
+    return f"{ONCE_PREFIX}{job_id}"
+
+
+def once_task_xml(job_id: str, at: datetime, python: str, workdir: str) -> str:
+    return _ONCE_XML.format(job_id=escape(job_id), start=at.strftime("%Y-%m-%dT%H:%M:%S"),
+                            python=escape(python), workdir=escape(workdir))
+
+
+def install_once(job_id: str, at: datetime, python: str, workdir: str, dry_run: bool = False) -> str:
+    """註冊（或覆蓋）一次性工作；dry_run 只回傳 XML 不碰工作排程器（測試用）。"""
+    xml = once_task_xml(job_id, at, python, workdir)
+    if dry_run:
+        return xml
+    fd, tmp_path = tempfile.mkstemp(suffix=".xml")
+    try:
+        with open(fd, "w", encoding="utf-16") as f:
+            f.write(xml)
+        r = _run(["schtasks", "/Create", "/TN", once_task_name(job_id), "/XML", tmp_path, "/F"])
+        if r.returncode != 0:
+            raise RuntimeError(f"schtasks /Create 失敗: {r.stderr.strip() or r.stdout.strip()}")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    return xml
+
+
+def delete_once(job_id: str) -> None:
+    name = once_task_name(job_id)
+    if _run(["schtasks", "/Query", "/TN", name]).returncode == 0:
+        _run(["schtasks", "/Delete", "/TN", name, "/F"])
