@@ -2,7 +2,7 @@
 """cli.py — ClaudeResumer 的命令列版：不開視窗，任何程式（ClawBot、別的 agent、腳本）都能叫（2026-10-03）。
 
     python -m claude_timer.cli sessions [--cwd 資料夾] [--limit N]          本機的對話清單
-    python -m claude_timer.cli show <session>                              一個對話的摘要（不花錢）
+    python -m claude_timer.cli show <session> [--turns N]                  一個對話的摘要；--turns 多印最近 N 輪（不花錢）
     python -m claude_timer.cli check <session>                             送出前檢查（不花錢）
     python -m claude_timer.cli resume <session> --prompt … [--at 時間]      接續舊對話（沒給 --at 就現在送）
     python -m claude_timer.cli new --cwd 資料夾 --prompt … [--at 時間]      在專案開一個全新的對話做新任務
@@ -249,6 +249,15 @@ def cmd_sessions(a) -> Tuple[int, object, str]:
     return EXIT_OK, {"sessions": rows, "total": total}, text
 
 
+def _turn_dict(turn: transcript.Turn) -> dict:
+    """一輪＝你說的那段＋它最後回的那段；中間的工具與思考只給一行摘要（要看去開視窗版）。"""
+    return {"n": turn.index + 1,
+            "when": turn.start.isoformat(timespec="seconds") if turn.start else "",
+            "prompt": turn.prompt.text if turn.prompt else "",
+            "reply": turn.reply.text if turn.reply else "",
+            "middle": turn.middle_label()}
+
+
 def cmd_show(a):
     s = find_session(a.session)
     t = transcript.read(s.jsonl)
@@ -258,11 +267,26 @@ def cmd_show(a):
     data = {"session_id": s.session_id, "cwd": s.cwd, "title": s.title,
             "started": d.started.isoformat(timespec="seconds") if d.started else "",
             "ended": d.ended.isoformat(timespec="seconds") if d.ended else "",
-            "human": d.human, "assistant": d.assistant, "tool_calls": d.tool_calls,
+            "turns": d.turns, "human": d.human, "assistant": d.assistant, "tool_calls": d.tool_calls,
             "top_tools": [list(x) for x in d.top_tools], "opening": d.opening,
             "last_human": d.last_human, "last_assistant": d.last_assistant}
     text = (f"{s.title}\n{d.span_label()}｜{d.volume_label()}\n"
             f"最後你說：{d.last_human[:200]}\n它回：{d.last_assistant[:300]}")
+    if a.turns:
+        # 最近 N 輪：給人在命令列看、也給 agent 當「這個對話做到哪」的脈絡
+        picked = t.turns[-a.turns:]
+        data["last_turns"] = [_turn_dict(x) for x in picked]
+        blocks = []
+        for x in picked:
+            when = x.start.strftime("%m-%d %H:%M") if x.start else "時間不明"
+            lines = [f"── 第 {x.index + 1} 輪｜{when}"]
+            if x.prompt:
+                lines.append(f"你：{x.prompt.text}")
+            if x.middle:
+                lines.append(f"（中間過程：{x.middle_label()}）")
+            lines.append(f"它：{x.reply.text}" if x.reply else "（這一輪還沒有回覆）")
+            blocks.append("\n".join(lines))
+        text += "\n\n" + "\n\n".join(blocks)
     return EXIT_OK, data, text
 
 
@@ -398,7 +422,9 @@ def _parser() -> argparse.ArgumentParser:
     sp = add("sessions", cmd_sessions, "本機的對話清單")
     sp.add_argument("--cwd", default="")
     sp.add_argument("--limit", type=int, default=sess.DEFAULT_LIMIT)
-    add("show", cmd_show, "一個對話的摘要").add_argument("session")
+    sp = add("show", cmd_show, "一個對話的摘要")
+    sp.add_argument("session")
+    sp.add_argument("--turns", type=int, default=0, help="另外印出最近 N 輪（你說什麼、它最後回什麼）")
     add("check", cmd_check, "送出前檢查").add_argument("session")
 
     def task_flags(sp):

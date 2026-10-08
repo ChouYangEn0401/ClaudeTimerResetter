@@ -7,13 +7,14 @@
 
 所以這裡做四件事，全部純讀本機檔案、不花任何 token：
 
-    1. 分類    人講的話、Claude 的回覆、工具動作、思考、壓縮點，各自標成不同種類，
-               讓畫面可以選擇性顯示（預設只留前兩種＋壓縮點）。
+    1. 分類    人講的話、Claude 的回覆、工具動作、思考、壓縮點，各自標成不同種類。
     2. 合併    連續的工具呼叫併成一則「⚙ Read ×3、Edit ×1」，不再一則一則洗版。
-    3. 分段    用「時間差」切段（預設隔超過 30 分鐘就算新的一段），再加上 compact
-               邊界。一個對話的段落通常就是你幾次回來工作的段落，這是最好認的軸。
-    4. 摘要    整理出主題、起訖時間、各類則數、最後一次你說了什麼 / 它回了什麼——
-               挑對話時，這四項幾乎就決定了「是不是這個」。
+    3. 分輪    以「你說了一句話」為界切成一輪一輪（Turn）：你的 prompt → 中間過程 →
+               它最後回的那一段。人認對話靠的就是「我當時說了什麼、它最後回了什麼」，
+               中間幾十次工具往返預設收起來，要看再展開。（v1.3.0 之前是照時間差切段，
+               結果一段裡還是一堆工具呼叫，等於沒切。）
+    4. 摘要    整理出起訖時間、各類則數、最後一次你說了什麼 / 它回了什麼——
+               挑對話時，這幾項幾乎就決定了「是不是這個」。
 
 資料來源欄位（實測 Claude Code 2.1 的 .jsonl）：
     type=user/assistant  一般訊息；user 幾乎都是 tool_result，真人打字的只佔少數
@@ -36,8 +37,6 @@ KIND_TOOLS = "tools"
 KIND_THINKING = "thinking"
 KIND_SYSTEM = "system"
 
-# 隔超過這麼久，就當作是「另一次回來工作」，切成新的一段。
-SEGMENT_GAP = timedelta(minutes=30)
 # 單則保留的字數上限（畫面上還會再摺疊）。
 ENTRY_CHAR_CAP = 8000
 # 整個對話最多保留幾則；超過就只留最近的，並在摘要裡註明。
@@ -46,7 +45,7 @@ MAX_ENTRIES = 3000
 MAX_LINES = 80000
 
 # 工具自己塞進訊息裡的區塊：系統提醒、VSCode 的「你現在開著哪個檔案」、診斷結果……
-# 那些是給模型看的環境資訊，不是你打的字，留著會讓摘要跟時段標題變成一堆標籤。
+# 那些是給模型看的環境資訊，不是你打的字，留著會讓摘要跟輪次標題變成一堆標籤。
 _NOISE_BLOCKS = re.compile(
     r"<(system-reminder|ide_[a-z_]+|diagnostics|local-command-stdout)>.*?</\1>", re.S)
 # 訊息被截斷時會出現沒有收尾的殘缺區塊，至少把開頭那個標籤拿掉。
@@ -78,12 +77,28 @@ class Entry:
 
 
 @dataclass
-class Segment:
-    """一個時間段（你一次回來工作的範圍）。"""
+class Turn:
+    """一輪：你說一句 → 中間的過程 → 它最後回的那一段。
+
+    prompt 可能是 None（例如對話檔開頭是壓縮摘要，或第一句之前只有分界）；
+    reply 是這一輪**最後一則** Claude 的文字回覆；中間的工具、思考、中途的回覆、分界
+    全部放 middle，畫面上預設收起來。
+    """
 
     index: int
-    entries: list[Entry] = field(default_factory=list)
-    gap_before: timedelta | None = None
+    prompt: Entry | None = None
+    reply: Entry | None = None
+    middle: list[Entry] = field(default_factory=list)
+
+    @property
+    def entries(self) -> list[Entry]:
+        out: list[Entry] = []
+        if self.prompt is not None:
+            out.append(self.prompt)
+        out.extend(self.middle)
+        if self.reply is not None:
+            out.append(self.reply)
+        return out
 
     @property
     def start(self) -> datetime | None:
@@ -101,27 +116,44 @@ class Segment:
 
     @property
     def title(self) -> str:
-        for kind in (KIND_HUMAN, KIND_ASSISTANT, KIND_SYSTEM):
-            for e in self.entries:
-                if e.kind == kind:
-                    return topic_line(e.text, 60)
+        """大綱上的一行：你說的第一句；沒有 prompt 就用分界或回覆。"""
+        if self.prompt is not None:
+            return topic_line(self.prompt.text, 60)
+        for e in self.middle:
+            if e.kind == KIND_SYSTEM:
+                return topic_line(e.text, 60)
+        if self.reply is not None:
+            return topic_line(self.reply.text, 60)
         return "（只有工具動作）"
 
-    def counts(self) -> Counter:
-        return Counter(e.kind for e in self.entries)
+    def tool_counter(self) -> Counter:
+        c: Counter = Counter()
+        for e in self.middle:
+            if e.kind == KIND_TOOLS:
+                c.update(e.tools)
+        return c
+
+    def middle_label(self) -> str:
+        """「中間過程」那一行要寫什麼：⚙ Bash ×12、Edit ×3｜回覆 2 則｜思考 1 則。"""
+        if not self.middle:
+            return ""
+        bits: list[str] = []
+        tools = self.tool_counter()
+        if tools:
+            bits.append(_tools_text(tools))
+        c = Counter(e.kind for e in self.middle)
+        if c[KIND_ASSISTANT]:
+            bits.append(f"中途回覆 {c[KIND_ASSISTANT]} 則")
+        if c[KIND_THINKING]:
+            bits.append(f"思考 {c[KIND_THINKING]} 則")
+        if c[KIND_SYSTEM]:
+            bits.append(f"分界 {c[KIND_SYSTEM]}")
+        return "｜".join(bits) or f"{len(self.middle)} 則"
 
     def header(self) -> str:
         start = self.start
         when = start.strftime("%m-%d %H:%M") if start else "時間不明"
-        c = self.counts()
-        bits = []
-        for kind, label in ((KIND_HUMAN, "你"), (KIND_ASSISTANT, "Claude"),
-                            (KIND_TOOLS, "工具"), (KIND_THINKING, "思考"),
-                            (KIND_SYSTEM, "分界")):
-            if c[kind]:
-                bits.append(f"{label} {c[kind]}")
-        gap = f"（距上一段 {format_duration(self.gap_before)}）" if self.gap_before else ""
-        return f"時段 {self.index + 1}｜{when}｜{'、'.join(bits) or '無訊息'}{gap}"
+        return f"第 {self.index + 1} 輪｜{when}"
 
 
 @dataclass
@@ -133,6 +165,7 @@ class Digest:
     human: int = 0
     assistant: int = 0
     tool_calls: int = 0
+    turns: int = 0
     top_tools: list[tuple[str, int]] = field(default_factory=list)
     opening: str = ""
     last_human: str = ""
@@ -153,7 +186,7 @@ class Digest:
         return f"{start} → {end}（歷時 {format_duration(self.duration)}）"
 
     def volume_label(self) -> str:
-        bits = [f"你 {self.human} 則", f"Claude {self.assistant} 則"]
+        bits = [f"{self.turns} 輪", f"你 {self.human} 則", f"Claude {self.assistant} 則"]
         if self.tool_calls:
             bits.append(f"工具 {self.tool_calls} 次")
         return "｜".join(bits)
@@ -164,7 +197,7 @@ class Transcript:
     ok: bool
     reason: str = ""
     entries: list[Entry] = field(default_factory=list)
-    segments: list[Segment] = field(default_factory=list)
+    turns: list[Turn] = field(default_factory=list)
     digest: Digest = field(default_factory=Digest)
 
 
@@ -179,9 +212,37 @@ def read(jsonl_path: str | Path) -> Transcript:
         return Transcript(ok=False, reason=f"讀不到對話檔：{e}")
     if not raw.entries:
         return Transcript(ok=False, reason="這個對話檔裡沒有可以顯示的訊息內容")
-    raw.segments = _split_segments(raw.entries)
-    raw.digest = _build_digest(raw.entries, truncated=raw.digest.truncated)
+    raw.turns = build_turns(raw.entries)
+    raw.digest = _build_digest(raw.entries, turns=len(raw.turns), truncated=raw.digest.truncated)
     return raw
+
+
+def build_turns(entries: list[Entry]) -> list[Turn]:
+    """以「你說了一句話」為界切輪。每一輪的 reply 是最後一則 Claude 文字，其餘進 middle。"""
+    turns: list[Turn] = []
+    current: Turn | None = None
+    for entry in entries:
+        if entry.kind == KIND_HUMAN:
+            if current is not None:
+                turns.append(current)
+            current = Turn(index=len(turns), prompt=entry)
+            continue
+        if current is None:
+            current = Turn(index=0)
+        if entry.kind == KIND_ASSISTANT:
+            # 新的一則回覆出現，上一則就變成「中途回覆」
+            if current.reply is not None:
+                current.middle.append(current.reply)
+            current.reply = entry
+        else:
+            # 工具／思考／分界：回覆之後還有工具動作，表示那一則回覆也只是中途的
+            if current.reply is not None:
+                current.middle.append(current.reply)
+                current.reply = None
+            current.middle.append(entry)
+    if current is not None:
+        turns.append(current)
+    return turns
 
 
 def format_duration(delta: timedelta | None) -> str:
@@ -374,35 +435,10 @@ def _parse_ts(raw) -> datetime | None:
         return None
 
 
-# ---------- 分段與摘要 ----------
+# ---------- 摘要 ----------
 
-def _split_segments(entries: list[Entry]) -> list[Segment]:
-    segments: list[Segment] = []
-    current = Segment(index=0)
-    previous_ts: datetime | None = None
-
-    for entry in entries:
-        gap = None
-        if entry.ts and previous_ts:
-            delta = entry.ts - previous_ts
-            if delta >= SEGMENT_GAP:
-                gap = delta
-        # 壓縮邊界也切一段：那是對話內容真的換過一輪的地方。
-        boundary = entry.kind == KIND_SYSTEM and current.entries
-        if (gap or boundary) and current.entries:
-            segments.append(current)
-            current = Segment(index=len(segments), gap_before=gap)
-        current.entries.append(entry)
-        if entry.ts:
-            previous_ts = entry.ts
-
-    if current.entries:
-        segments.append(current)
-    return segments
-
-
-def _build_digest(entries: list[Entry], *, truncated: bool) -> Digest:
-    digest = Digest(truncated=truncated)
+def _build_digest(entries: list[Entry], *, turns: int, truncated: bool) -> Digest:
+    digest = Digest(truncated=truncated, turns=turns)
     stamps = [e.ts for e in entries if e.ts]
     if stamps:
         digest.started, digest.ended = stamps[0], stamps[-1]
