@@ -11,7 +11,7 @@
 兩支是**獨立的 exe**、各自獨立使用，沒有先後關係，也不需要都裝。
 為什麼分成兩支而不是一個工具兩個分頁 → [docs/design.md](docs/design.md)。
 
-目前版本 **v1.3.0**（更動見 [CHANGELOG.md](CHANGELOG.md)）。
+目前版本 **v1.3.1**（更動見 [CHANGELOG.md](CHANGELOG.md)）。
 
 ---
 
@@ -70,6 +70,7 @@ scripts\test.bat         :: 該刷新就刷新一次，不該刷新就不打。�
 |---|---|
 | 排程規則怎麼設？兩種背景執行方式差在哪？怎麼解除安裝？ | [docs/resetter.md](docs/resetter.md) |
 | 怎麼排一筆接續？為什麼「對話不能開著」？權限模式選哪個？ | [docs/resumer.md](docs/resumer.md) |
+| 每一顆按鈕在哪個函式？別的程式（Python／CLI）怎麼叫？ | [docs/api.md](docs/api.md) |
 | 怎麼建 exe、發佈、改程式？ | [docs/build.md](docs/build.md) |
 | 為什麼是兩支工具？為什麼這麼便宜？當初踩過哪些坑？ | [docs/design.md](docs/design.md) |
 
@@ -87,6 +88,7 @@ claude_timer/
   resumer/    app（主視窗）、sessions（對話清單、來源、誰正開著）、transcript（對話分輪）、
               viewer（內容預覽）、tasks（一筆接續任務）、jobs（CLI 的排程紀錄）、launch（送出）
   cli.py      ClaudeResumer 命令列版（docs/cli.md）
+  api.py      同一套功能的 Python API（docs/api.md）
 packaging/    兩份手寫的 PyInstaller spec（進版控，理由見 docs/build.md）
 docs/         說明文件
 scripts/      setup / test / usage / build（含雙擊用的 build-resetter / build-resumer）

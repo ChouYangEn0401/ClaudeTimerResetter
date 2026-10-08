@@ -1,5 +1,15 @@
 # 更動記錄
 
+## v1.3.1
+
+**Python API（`claude_timer/api.py`）**：視窗上每一顆按鈕、CLI 每一個子指令都對到一個函式（sessions／show／check／
+release／resume／new／jobs／job／cancel／stash／fire），回 `Result(code, data, text)`，跟 CLI 走同一條程式
+（`cli.run()`）、不丟例外。對照表（按鈕 → 函式 → CLI → 實作在哪）在 `docs/api.md`。
+
+**修正：好幾個 CLI 行程同時寫 `resume_jobs.json` 會掉資料**。以前只有行程內的鎖：兩個行程各寫各的，後寫的蓋掉
+先寫的那一筆；剛好在別人換檔那一瞬間讀檔還會當成空的、整份清掉。現在加了跨行程的檔案鎖，讀到一半遇到換檔會等一下
+再讀，壞掉的檔案改名留證據。（追 ClawBot 的連動測試間歇失敗時找到的。）
+
 ## v1.3.0
 
 三件事都來自實際用了一陣子的回饋（2026-10-08）：預覽找不到內容、同名專案分不清、佔用釋放不掉。
@@ -40,7 +50,8 @@
   結束碼寫成契約（0／1／2／3／4）。說明在 `docs/cli.md`，給 agent 讀的在 `skills/claude-resumer/SKILL.md`。
 - **`new`：在專案開一個全新的對話做新任務**（以前 resumer 只能接舊對話）。新的 session id 先決定好，之後可以再接。
 - 排程不靠視窗開著：每筆 job 一個一次性的 Windows 工作排程 `ClaudeResumer-<id>`；被佔用每 2 分鐘補試、最多 1 小時；
-  電腦那時是關的，開機後補跑。job 存在 `%LOCALAPPDATA%\ClaudeTimerResetteresume_jobs.json`。
+  電腦那時是關的，開機後補跑。job 存在 `%LOCALAPPDATA%\ClaudeTimerResetter
+esume_jobs.json`。
 - 跑的時候能碰到什麼：內容釘死（content_hash 不一樣就不跑）；`new` 預設在獨立 git worktree＋branch 跑；
   `resume` 預設要求工作目錄乾淨並記下起點 commit，`job` 看得到改動、`stash` 收得回來；工具限制與預算原樣交給 claude。
 - 送出的邏輯抽成 `claude_timer/resumer/launch.py`，視窗版和命令列版共用同一份。

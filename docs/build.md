@@ -77,7 +77,8 @@ claude_timer/
     launch.py      組 claude 的 argv、開獨立行程（視窗版與 CLI 共用）
     jobs.py        CLI 的排程紀錄（resume_jobs.json）
     journal.py     resumer 的檔案紀錄
-  cli.py         ClaudeResumer 命令列版
+  cli.py         ClaudeResumer 命令列版（run() 給 api.py 共用）
+  api.py         Python API：每一顆按鈕一個函式（docs/api.md）
 ```
 
 規則：**畫面不碰邏輯，邏輯不碰畫面**。`core/` 跟 `resumer/transcript.py`、

@@ -9,7 +9,8 @@ A command-line tool in the ClaudeTimerResetter repo. It runs `claude --print` fo
 (through a one-shot Windows scheduled task, so nothing has to stay open), and keeps a record you can query.
 
 Run it as `<ClaudeTimerResetter>\scripts\ctr.bat <subcommand> --json` (or `.venv\Scripts\python -m claude_timer.cli`).
-Always pass `--json` when a program reads the output.
+Always pass `--json` when a program reads the output. From Python on this machine, `from claude_timer import api`
+gives the same calls as functions returning `Result(code, data, text)` (see `docs/api.md` for which button maps to which call).
 
 ## When to use which
 

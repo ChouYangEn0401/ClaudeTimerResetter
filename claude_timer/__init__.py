@@ -6,11 +6,12 @@
     claude_timer.resetter  ClaudeTimerResetter.exe：提前把 5 小時視窗的重置時鐘催起來
     claude_timer.resumer   ClaudeResumer.exe：時間一到，把指定對話接著送出去
     claude_timer.cli       ClaudeResumer 的命令列版：不開視窗，任何程式都能叫（docs/cli.md）
+    claude_timer.api       同一套功能的 Python API：每一顆按鈕一個函式（docs/api.md）
 
 進入點在專案根目錄的 resetter.py / resumer.py，這裡只放實作。
 版本號是單一來源：兩個 GUI 的標題、打包產物都讀這裡。
 """
 from __future__ import annotations
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 APP_NAME = "ClaudeTimerResetter"

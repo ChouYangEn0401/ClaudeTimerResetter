@@ -2,7 +2,8 @@
 
 ClaudeResumer 的視窗版要「保持開著才會準時送」；命令列版把排程交給 Windows 工作排程器，**任何程式都能叫**：
 你在 cmd 裡、ClawBot（Telegram／本機畫面）、別的專案的 agent 都用同一套指令。給 agent 讀的精簡版在
-[skills/claude-resumer/SKILL.md](../skills/claude-resumer/SKILL.md)。
+[skills/claude-resumer/SKILL.md](../skills/claude-resumer/SKILL.md)；Python 程式直接 `from claude_timer import api`，
+每一顆按鈕對到哪個函式見 [api.md](api.md)。
 
 ```bat
 scripts\ctr.bat sessions --cwd C:\path\to\project       :: 這個專案的對話清單
