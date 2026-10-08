@@ -10,11 +10,18 @@
 跟最後一句使用者輸入（last-prompt）寫進同一個 .jsonl，用這些欄位比「檔案裡第一行
 使用者訊息」好認太多——被 session limit 卡住的那個對話，通常是靠「最後我跟它說了
 什麼」認出來的。
+
+為什麼還要分「來源」（v1.3.0）：同一台電腦上，ClawBot 的 AI 秘書、resumer 自己的 new、
+各種探針都用 `claude -p` 開對話，資料夾叫 agent_workspace、scratchpad、一串 hex；加上
+worktree 分身跟主專案同名。清單上全部混在一起就是「一堆同名專案不知道哪個是哪個」。
+所以每一列多記：git 分支（gitBranch）、從哪開的（entrypoint）、資料夾是哪一種
+（classify_origin），同名的專案帶上一層資料夾，暫存與程式用的預設藏起來。
 """
 from __future__ import annotations
 
 import ctypes
 import json
+import os
 import platform
 import subprocess
 import time
@@ -32,6 +39,16 @@ HEAD_LINES = 60
 TAIL_BYTES = 96 * 1024
 
 
+ORIGIN_PROJECT, ORIGIN_WORKTREE, ORIGIN_APP, ORIGIN_TEMP, ORIGIN_UNKNOWN = "project", "worktree", "app", "temp", "unknown"
+ORIGIN_LABELS = {ORIGIN_PROJECT: "", ORIGIN_WORKTREE: "分身", ORIGIN_APP: "程式用", ORIGIN_TEMP: "暫存",
+                 ORIGIN_UNKNOWN: "？"}
+# 對話是從哪裡開的（.jsonl 裡每一則的 entrypoint）：VSCode 擴充、終端機、還是程式用 -p 開的（ClawBot、
+# resumer 自己、各種探針）。同一個資料夾會同時有這三種，不標出來就會「一堆同名專案不知道哪個是哪個」。
+ENTRY_LABELS = {"claude-vscode": "VSCode", "cli": "終端", "sdk-cli": "程式(-p)", "sdk-ts": "程式", "sdk-py": "程式"}
+# 清單預設藏起來的來源：暫存資料夾與程式自己的工作區裡的對話，幾乎不會是你要接的那一個。
+HIDDEN_BY_DEFAULT = (ORIGIN_TEMP, ORIGIN_APP)
+
+
 @dataclass
 class SessionInfo:
     """清單上的一列。jsonl / cwd / session_id 是送出時真正會用到的三個欄位。"""
@@ -43,11 +60,31 @@ class SessionInfo:
     last_prompt: str
     mtime: float
     size: int
+    branch: str = ""                 # 對話當時的 git 分支（.jsonl 的 gitBranch）
+    entrypoint: str = ""             # claude-vscode / cli / sdk-cli …
+    origin: str = ORIGIN_UNKNOWN     # classify_origin() 算出來的
+    label: str = ""                  # 清單上顯示的專案名；同名時帶上一層資料夾（scan_sessions 算）
     holder: dict | None = field(default=None, compare=False)
 
     @property
     def project(self) -> str:
         return Path(self.cwd).name if self.cwd else "(無專案路徑)"
+
+    @property
+    def display(self) -> str:
+        """清單上的專案欄：有算出 label 就用它，否則退回資料夾名。"""
+        return self.label or self.project
+
+    @property
+    def source_label(self) -> str:
+        """「來源」欄：分身·VSCode、程式用·程式(-p)、VSCode……一眼看出是不是你自己開的那個。"""
+        where = ORIGIN_LABELS.get(self.origin, "")
+        how = ENTRY_LABELS.get(self.entrypoint, self.entrypoint or "")
+        return "·".join(b for b in (where, how) if b)
+
+    @property
+    def hidden_by_default(self) -> bool:
+        return self.origin in HIDDEN_BY_DEFAULT
 
     @property
     def last_active(self) -> str:
@@ -104,23 +141,82 @@ def scan_sessions(limit: int = DEFAULT_LIMIT) -> tuple[list[SessionInfo], int]:
         info = _peek(path, mtime, size)
         if info is not None:
             out.append(info)
+    assign_labels(out)
     return out, len(paths)
+
+
+def classify_origin(cwd: str) -> str:
+    """這個對話的資料夾是哪一種：你的專案、專案的分身（worktree）、程式自己的工作區、暫存。
+
+    純看路徑，不讀 git 設定（分身的 .git 是一個檔案而不是資料夾，看得出來；資料夾已經不在了就只看名字）。
+    """
+    if not cwd:
+        return ORIGIN_UNKNOWN
+    norm = os.path.normcase(os.path.abspath(cwd))
+    for var in ("TEMP", "TMP"):
+        root = os.environ.get(var)
+        if root and _under(norm, root):
+            return ORIGIN_TEMP
+    # 排程器跑起來時 TEMP 可能指到別處：使用者自己的暫存資料夾照路徑認，非 Windows 看 /tmp
+    if _under(norm, str(Path.home() / "AppData" / "Local" / "Temp")) or (norm + "/").startswith("/tmp/"):
+        return ORIGIN_TEMP
+    local = os.environ.get("LOCALAPPDATA")
+    if local and _under(norm, local):
+        return ORIGIN_APP
+    parts = {p.lower() for p in Path(cwd).parts}
+    if parts & {"worktrees", "_worktrees", ".worktrees"}:
+        return ORIGIN_WORKTREE
+    try:
+        if (Path(cwd) / ".git").is_file():
+            return ORIGIN_WORKTREE
+    except OSError:
+        pass
+    return ORIGIN_PROJECT
+
+
+def _under(norm_path: str, root: str) -> bool:
+    root = os.path.normcase(os.path.abspath(root)).rstrip("\\/")
+    return norm_path == root or norm_path.startswith(root + os.sep) or norm_path.startswith(root + "/")
+
+
+def assign_labels(sessions: list[SessionInfo]) -> None:
+    """同名的專案資料夾（例如兩個不同地方都叫 WebApp）在清單上帶上一層資料夾，才分得出來。
+
+    暫存與程式用的資料夾名字本來就沒意義（scratchpad、agent_workspace、一串 hex），不特別處理，
+    靠「來源」欄分辨。
+    """
+    by_name: dict[str, set[str]] = {}
+    for s in sessions:
+        if s.origin in (ORIGIN_PROJECT, ORIGIN_WORKTREE) and s.cwd:
+            by_name.setdefault(s.project.lower(), set()).add(os.path.normcase(os.path.abspath(s.cwd)))
+    for s in sessions:
+        name = s.project
+        if s.origin in (ORIGIN_PROJECT, ORIGIN_WORKTREE) and s.cwd and len(by_name.get(name.lower(), ())) > 1:
+            parent = Path(s.cwd).parent.name
+            name = f"{parent}/{name}" if parent else name
+        s.label = name
 
 
 def _peek(path: Path, mtime: float, size: int) -> SessionInfo | None:
     """讀頭尾各一小段，湊出清單要顯示的欄位。讀不到有意義的內容就跳過這個檔。"""
     cwd = ""
     first_prompt = ""
+    branch = ""
+    entrypoint = ""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f):
-                if i >= HEAD_LINES or (cwd and first_prompt):
+                if i >= HEAD_LINES or (cwd and first_prompt and branch and entrypoint):
                     break
                 rec = _loads(line)
                 if rec is None:
                     continue
                 if not cwd and rec.get("cwd"):
                     cwd = rec["cwd"]
+                if not branch and rec.get("gitBranch"):
+                    branch = str(rec["gitBranch"])
+                if not entrypoint and rec.get("entrypoint"):
+                    entrypoint = str(rec["entrypoint"])
                 if not first_prompt and rec.get("type") == "user" and not rec.get("isMeta"):
                     first_prompt = clean_one_line(_plain_user_text(rec) or "")
     except OSError:
@@ -150,6 +246,10 @@ def _peek(path: Path, mtime: float, size: int) -> SessionInfo | None:
         last_prompt=last_prompt or first_prompt,
         mtime=mtime,
         size=size,
+        branch=branch,
+        entrypoint=entrypoint,
+        origin=classify_origin(cwd),
+        label=Path(cwd).name if cwd else "",
     )
 
 

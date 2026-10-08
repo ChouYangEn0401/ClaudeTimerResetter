@@ -76,6 +76,10 @@ class ConversationViewer(tk.Toplevel):
                   wraplength=900, justify="left").pack(anchor="w")
         meta = f"{self.session.cwd or '(無專案路徑)'}｜session {self.session.session_id}｜" \
                f"最後活動 {self.session.relative_time}"
+        if self.session.branch:
+            meta += f"｜分支 {self.session.branch}"
+        if self.session.source_label:
+            meta += f"｜{self.session.source_label}"
         ttk.Label(head, text=meta, style="Muted.TLabel", wraplength=900,
                   justify="left").pack(anchor="w", pady=(2, 0))
         holder = session_holder(self.session.session_id)

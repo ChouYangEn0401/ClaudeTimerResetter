@@ -117,7 +117,7 @@ class Task:
         mode = "自動" if self.mode == "auto" else "手動確認"
         return (
             self.when.strftime("%m-%d %H:%M:%S"),
-            self.session.project,
+            self.session.display,
             " ".join(self.prompt.split())[:40],
             mode,
             self.status if not self.error else f"{self.status}",

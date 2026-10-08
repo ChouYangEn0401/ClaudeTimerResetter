@@ -109,20 +109,25 @@ class App(tk.Tk):
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *_: self._refresh_session_list())
         ttk.Entry(row, textvariable=self.filter_var).pack(side="left", fill="x", expand=True, padx=6)
+        self.hide_noise_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row, text="藏起暫存與程式用的", variable=self.hide_noise_var,
+                        command=self._refresh_session_list).pack(side="left", padx=(0, 6))
         ttk.Button(row, text="重新整理", command=lambda: self._reload_sessions()).pack(side="left")
         ttk.Button(row, text="查看內容", command=self._view_conversation).pack(side="left", padx=(6, 0))
         ttk.Button(row, text="檢查可否送出", command=self._diagnose).pack(side="left", padx=(6, 0))
 
         wrap = ttk.Frame(card, style="Card.TFrame")
         wrap.pack(fill="both", expand=True, pady=(8, 0))
-        columns = ("when", "project", "title", "last", "state")
+        columns = ("when", "project", "branch", "title", "last", "source", "state")
         self.session_tree = ttk.Treeview(wrap, columns=columns, show="headings", height=9,
                                          selectmode="browse")
         for key, label, width, stretch in (
             ("when", "最後活動", 90, False),
-            ("project", "專案", 160, False),
-            ("title", "對話標題", 240, True),
-            ("last", "最後一句", 320, True),
+            ("project", "專案", 170, False),
+            ("branch", "分支", 110, False),
+            ("title", "對話標題", 220, True),
+            ("last", "最後一句", 280, True),
+            ("source", "來源", 110, False),
             ("state", "狀態", 90, False),
         ):
             self.session_tree.heading(key, text=label)
@@ -142,8 +147,9 @@ class App(tk.Tk):
         ttk.Label(foot, textvariable=self.session_hint_var, style="Muted.TLabel").pack(side="left")
         self.more_button = ttk.Button(foot, text="載入更多", command=self._load_more)
         self.more_button.pack(side="right")
-        ttk.Label(card, text="不確定是不是這個？雙擊該列先看內容（摘要、時段、往來訊息都在裡面，不花錢）。"
-                             "標成「開啟中」的代表現在正開在 VSCode，送出前要先關掉。",
+        ttk.Label(card, text="不確定是不是這個？雙擊該列先看內容（每一輪你說了什麼、它最後回了什麼，不花錢）。"
+                             "「來源」分得出 VSCode 開的、終端開的、程式用 -p 開的（ClawBot、探針）；分身＝worktree，"
+                             "同名專案會帶上一層資料夾。標成「開啟中」的代表現在正被佔用，送出前要先關掉或釋放。",
                   style="Muted.TLabel", wraplength=1000, justify="left").pack(anchor="w", pady=(6, 0))
 
     def _build_form_card(self, parent) -> None:
@@ -281,24 +287,29 @@ class App(tk.Tk):
 
     def _refresh_session_list(self) -> None:
         query = self.filter_var.get().strip().lower()
+        hide_noise = self.hide_noise_var.get()
         holders = active_holders()
         self.session_tree.delete(*self.session_tree.get_children())
         self._visible = [
             s for s in self.sessions
-            if not query or query in s.cwd.lower() or query in s.title.lower()
-            or query in s.last_prompt.lower()
+            if (not hide_noise or not s.hidden_by_default)
+            and (not query or query in s.cwd.lower() or query in s.title.lower()
+                 or query in s.last_prompt.lower() or query in s.branch.lower()
+                 or query in s.display.lower())
         ]
         for i, s in enumerate(self._visible):
             s.holder = holders.get(s.session_id)
             tags = ["open"] if s.holder else (["odd"] if i % 2 else [])
             self.session_tree.insert(
                 "", "end", iid=s.session_id, tags=tags,
-                values=(s.relative_time, s.project, s.title, s.last_prompt,
+                values=(s.relative_time, s.display, s.branch, s.title, s.last_prompt, s.source_label,
                         "● 開啟中" if s.holder else ""),
             )
         shown, total = len(self._visible), self.total_sessions
+        hidden = sum(1 for s in self.sessions if hide_noise and s.hidden_by_default)
         self.session_hint_var.set(
-            f"顯示 {shown} 個對話（本機共 {total} 個，目前載入最近 {len(self.sessions)} 個）")
+            f"顯示 {shown} 個對話（本機共 {total} 個，目前載入最近 {len(self.sessions)} 個"
+            + (f"，藏起 {hidden} 個暫存／程式用的" if hidden else "") + "）")
         if len(self.sessions) >= total:
             self.more_button.state(["disabled"])
         else:
@@ -312,7 +323,15 @@ class App(tk.Tk):
             return
         self._selected = next((s for s in self._visible if s.session_id == sel[0]), None)
         if self._selected is not None:
-            self.selected_var.set(f"已選：{self._selected.project}｜{self._selected.title}")
+            self.selected_var.set(self._selected_text(self._selected))
+
+    @staticmethod
+    def _selected_text(session: SessionInfo) -> str:
+        """「已選」那一行：專案、標題，第二行寫完整路徑與分支——同名專案靠這行確認選對了。"""
+        where = session.cwd or "(無專案路徑)"
+        if session.branch:
+            where += f"  ⎇ {session.branch}"
+        return f"已選：{session.display}｜{session.title}\n{where}"
 
     def _selected_session(self) -> SessionInfo | None:
         if self._selected is None:
@@ -323,12 +342,14 @@ class App(tk.Tk):
         """從預覽視窗的「就選這個對話」回來：在清單裡把它選起來（必要時清掉篩選）。"""
         if session not in self._visible:
             self.filter_var.set("")
+            if session.hidden_by_default:
+                self.hide_noise_var.set(False)
             self._refresh_session_list()
         if session.session_id in self.session_tree.get_children():
             self.session_tree.selection_set(session.session_id)
             self.session_tree.see(session.session_id)
         self._selected = session
-        self.selected_var.set(f"已選：{session.project}｜{session.title}")
+        self.selected_var.set(self._selected_text(session))
 
     def _view_conversation(self) -> None:
         session = self._selected_session()

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """cli.py — ClaudeResumer 的命令列版：不開視窗，任何程式（ClawBot、別的 agent、腳本）都能叫（2026-10-03）。
 
-    python -m claude_timer.cli sessions [--cwd 資料夾] [--limit N]          本機的對話清單
+    python -m claude_timer.cli sessions [--cwd 資料夾] [--limit N] [--all]  本機的對話清單（預設藏暫存／程式用的）
     python -m claude_timer.cli show <session> [--turns N]                  一個對話的摘要；--turns 多印最近 N 輪（不花錢）
     python -m claude_timer.cli check <session>                             送出前檢查（不花錢）
     python -m claude_timer.cli resume <session> --prompt … [--at 時間]      接續舊對話（沒給 --at 就現在送）
@@ -109,7 +109,8 @@ def find_session(session_id: str) -> sess.SessionInfo:
 
 def _session_dict(s: sess.SessionInfo, holders: dict) -> dict:
     holder = holders.get(s.session_id)
-    return {"session_id": s.session_id, "cwd": s.cwd, "project": s.project, "title": s.title,
+    return {"session_id": s.session_id, "cwd": s.cwd, "project": s.project, "label": s.display, "title": s.title,
+            "branch": s.branch, "entrypoint": s.entrypoint, "origin": s.origin, "source": s.source_label,
             "last_prompt": s.last_prompt, "last_active": datetime.fromtimestamp(s.mtime).isoformat(timespec="seconds"),
             "relative": s.relative_time, "busy": bool(holder),
             "holder": sess.describe_holder(holder) if holder else ""}
@@ -240,11 +241,15 @@ def schedule_or_fire(job: store.Job, at: Optional[datetime], dry_run: bool) -> T
 def cmd_sessions(a) -> Tuple[int, object, str]:
     found, total = sess.scan_sessions(a.limit)
     if a.cwd:
+        # 指定了資料夾就全部給（呼叫端要的就是「這個專案的」，不管它是程式開的還是人開的）
         want = os.path.normcase(os.path.abspath(a.cwd))
         found = [s for s in found if s.cwd and os.path.normcase(os.path.abspath(s.cwd)) == want]
+    elif not a.all:
+        found = [s for s in found if not s.hidden_by_default]
     holders = sess.active_holders()
     rows = [_session_dict(s, holders) for s in found]
-    text = "\n".join(f"{r['session_id']}  {r['relative']:<8} {r['project']:<20} {'● 開啟中 ' if r['busy'] else ''}"
+    text = "\n".join(f"{r['session_id']}  {r['relative']:<8} {r['label'][:24]:<24} {r['branch'][:16]:<16} "
+                     f"{r['source']:<12} {'● 開啟中 ' if r['busy'] else ''}"
                      f"{r['title'][:40]}｜{r['last_prompt'][:40]}" for r in rows) or "（沒有對話）"
     return EXIT_OK, {"sessions": rows, "total": total}, text
 
@@ -422,6 +427,7 @@ def _parser() -> argparse.ArgumentParser:
     sp = add("sessions", cmd_sessions, "本機的對話清單")
     sp.add_argument("--cwd", default="")
     sp.add_argument("--limit", type=int, default=sess.DEFAULT_LIMIT)
+    sp.add_argument("--all", action="store_true", help="連暫存資料夾、程式自己工作區裡的對話也列（預設藏起來）")
     sp = add("show", cmd_show, "一個對話的摘要")
     sp.add_argument("session")
     sp.add_argument("--turns", type=int, default=0, help="另外印出最近 N 輪（你說什麼、它最後回什麼）")
