@@ -1,5 +1,38 @@
 # 更動記錄
 
+## v1.3.0
+
+三件事都來自實際用了一陣子的回饋（2026-10-08）：預覽找不到內容、同名專案分不清、佔用釋放不掉。
+
+**對話預覽：一輪一輪看「你說 → 它最後回」**
+- 以前照時間差切段，一段裡還是幾十則「⚙ 工具動作」洗版。現在以「你說一句」為界切輪：你的整段、
+  「▸ 中間過程：⚙ Bash ×12、Edit ×3｜中途回覆 2 則」預設收起來、它最後回的整段；沒有回覆的那一輪
+  標「可能就是卡在這裡」。左邊大綱列每一輪你說的第一句；很長的對話只展開最近 10 輪；搜尋只留下有
+  那段字的輪並自動展開中間過程。
+- CLI `show <session> --turns N` 多印最近 N 輪（JSON 的 `last_turns`），給 agent 當「做到哪」的脈絡。
+
+**清單：分得出誰是誰**
+- 每一列多讀 .jsonl 的 git 分支與 entrypoint；資料夾分成專案／分身（worktree）／程式用（LOCALAPPDATA）／
+  暫存（TEMP）；同名的專案資料夾帶上一層資料夾（`work/WebApp`、`play/WebApp`）。
+- 視窗版多「分支」「來源」兩欄（`VSCode`、`終端`、`程式(-p)`、`分身·VSCode`…），「藏起暫存與程式用的」
+  預設勾著（ClawBot 的 AI 秘書、探針、resumer 自己 new 出來的對話不再混在清單裡）；「已選」那行寫
+  完整路徑與分支。
+- CLI `sessions` 預設也藏暫存／程式用的，`--all` 才列；指定 `--cwd` 時不過濾。JSON 多 `label`／`branch`／
+  `entrypoint`／`origin`／`source`，原本的 `project` 不變。
+
+**佔用：偵測修正、只釋放、到時接管**
+- **殘留鎖修掉**：`~/.claude/sessions/<pid>.json` 在行程結束後不一定會清掉、pid 又會被重用，以前只看
+  「pid 活著而且叫 claude」，VSCode 開關幾次之後一個早就關掉的對話會一直顯示被佔用。現在要跟
+  Claude Code 寫的 `procStart`（行程建立時間）對得上才算持有者；描述多了「閒置中（最後動作 N 分鐘前）」。
+- **「釋放佔用（不送出）」**（視窗版 ①、CLI `release <session>`）：只把佔用的行程關掉，不送任何東西。
+- **「被佔用時」是排程時就講好的**（視窗版 ② 三選一；CLI `resume --take-over`／`--fork`）：等它關掉再補送
+  （預設）／時間到就強制接管／分支接續（`--fork-session`，原本的對話框可以留著，**未實測**能不能繞過鎖）。
+  ③ 的「強制接管並送出」改名「立刻接管並送出」並寫明是現在就動手；另加「改成到時接管」。
+- `core/procs.py`：pid＋建立時間的比對，job 與持有者共用。
+
+**測試**：`tests/test_transcript.py`、`tests/test_sessions.py`、`tests/test_holders.py`，`tests/test_cli.py`
+多了到時接管、--fork、release。
+
 ## v1.2.0
 
 **ClaudeResumer 命令列版（`python -m claude_timer.cli`、`scripts\ctr.bat`）**

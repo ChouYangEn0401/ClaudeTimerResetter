@@ -60,6 +60,7 @@ claude_timer/
     rules.py       排程規則引擎（interval / daily_times / burst）
     scheduler.py   Windows 工作排程器包裝（schtasks + XML）
     autostart.py   開機自動啟動捷徑
+    procs.py       pid 還是不是當初那個行程（建立時間比對；job 與持有者偵測共用）
   ui/
     theme.py     配色、字級、ttk 樣式、高 DPI、視窗尺寸貼合螢幕
     scroll.py    可捲動版面容器（內容超過視窗高度就出現捲軸）
@@ -69,11 +70,14 @@ claude_timer/
     tray.py      工具列常駐驅動
   resumer/
     app.py         主視窗
-    sessions.py    掃對話清單、偵測「誰正開著這個對話」
-    transcript.py  把 .jsonl 讀成有結構的對話（分類、合併、分段、摘要）
-    viewer.py      內容預覽視窗
-    tasks.py       一筆接續任務（送出、盯行程、失敗處理）
+    sessions.py    掃對話清單（來源、分支、同名標籤）、偵測「誰正開著這個對話」、釋放佔用
+    transcript.py  把 .jsonl 讀成有結構的對話（分類、合併、分輪、摘要）
+    viewer.py      內容預覽視窗（一輪一輪：你說 → 中間過程 → 它最後回）
+    tasks.py       一筆接續任務（送出、盯行程、失敗處理、被佔用時怎麼辦）
+    launch.py      組 claude 的 argv、開獨立行程（視窗版與 CLI 共用）
+    jobs.py        CLI 的排程紀錄（resume_jobs.json）
     journal.py     resumer 的檔案紀錄
+  cli.py         ClaudeResumer 命令列版
 ```
 
 規則：**畫面不碰邏輯，邏輯不碰畫面**。`core/` 跟 `resumer/transcript.py`、

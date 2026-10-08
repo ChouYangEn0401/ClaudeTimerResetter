@@ -15,9 +15,12 @@ Always pass `--json` when a program reads the output.
 
 | Goal | Command |
 |------|---------|
-| Find the conversation to continue | `sessions --cwd <project folder>` (newest first; `busy: true` means it is open right now) |
-| See what a conversation was doing | `show <session_id>` |
+| Find the conversation to continue | `sessions --cwd <project folder>` (newest first; `busy: true` means it is open right now; `label`/`branch`/`source` tell same-named folders, worktrees and `-p` sessions apart; without `--cwd`, temp and tool-owned folders are hidden unless `--all`) |
+| See what a conversation was doing | `show <session_id> [--turns 3]` (`last_turns[]`: the person's prompt, a one-line summary of the tool work, the final reply of each turn) |
 | Continue a conversation (now or later) | `resume <session_id> --prompt "continue" [--at 06:00]` |
+| …and make sure it sends even if the conversation is still open at that time | add `--take-over` (kills the holder at fire time — destructive, so the caller must have asked the person) |
+| …without taking the open conversation away | add `--fork` (`--fork-session`: continues under a new session id; **untested** whether it bypasses the lock) |
+| Free a conversation that is held open but no longer used | `release <session_id>` (kills the holding Claude Code process, sends nothing) |
 | Start a fresh conversation for a new task | `new --cwd <project folder> --prompt "<task>" [--at +30]` |
 | Did it finish? What did it say / change / cost? | `job <id>` |
 | Undo what a resume changed | `stash <id>` |
@@ -40,6 +43,8 @@ Always pass `--json` when a program reads the output.
   `bypassPermissions` unless the person explicitly asked for it. `--allowed-tools`, `--disallowed-tools`,
   `--max-budget-usd` are passed straight to `claude`.
 - **A conversation can only have one owner.** If it is open in VSCode when the time comes, the job waits (exit 3)
-  and sends as soon as it is closed.
+  and sends as soon as it is closed. `check <session_id>` tells you who holds it and for how long it has been
+  idle (`holder_state`). `--take-over` and `release` end that holder's process: anything unsaved in that
+  conversation is lost, so only use them when the person asked for exactly that.
 - This tool does not decide *who* may schedule work. Callers that act for a remote user (for example ClawBot over
   Telegram) must check that themselves before calling it.

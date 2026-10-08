@@ -11,7 +11,7 @@
 兩支是**獨立的 exe**、各自獨立使用，沒有先後關係，也不需要都裝。
 為什麼分成兩支而不是一個工具兩個分頁 → [docs/design.md](docs/design.md)。
 
-目前版本 **v1.2.0**（更動見 [CHANGELOG.md](CHANGELOG.md)）。
+目前版本 **v1.3.0**（更動見 [CHANGELOG.md](CHANGELOG.md)）。
 
 ---
 
@@ -81,11 +81,12 @@ scripts\test.bat         :: 該刷新就刷新一次，不該刷新就不打。�
 resetter.py / resumer.py     兩支 exe 的進入點（只做轉接，實作在套件裡）
 claude_timer/
   core/       不帶畫面的核心：usage（查用量）、ping（探針）、rules（排程規則）、
-              scheduler（Windows 工作排程器）、autostart（開機捷徑）
+              scheduler（Windows 工作排程器）、autostart（開機捷徑）、procs（pid 還是不是當初那個行程）
   ui/         兩個 GUI 共用的外觀：theme（配色字級）、scroll（可捲動版面）
   resetter/   app（主控台 GUI）、service（安裝與 tick）、tray（工具列常駐）
-  resumer/    app（主視窗）、sessions（對話清單）、transcript（對話結構化）、
-              viewer（內容預覽）、tasks（一筆接續任務）
+  resumer/    app（主視窗）、sessions（對話清單、來源、誰正開著）、transcript（對話分輪）、
+              viewer（內容預覽）、tasks（一筆接續任務）、jobs（CLI 的排程紀錄）、launch（送出）
+  cli.py      ClaudeResumer 命令列版（docs/cli.md）
 packaging/    兩份手寫的 PyInstaller spec（進版控，理由見 docs/build.md）
 docs/         說明文件
 scripts/      setup / test / usage / build（含雙擊用的 build-resetter / build-resumer）
