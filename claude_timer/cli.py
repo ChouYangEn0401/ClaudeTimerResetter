@@ -442,11 +442,11 @@ def cmd_stash(a):
 
 # ── argparse ──────────────────────────────────────────────────────────
 
-def _parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="python -m claude_timer.cli",
-                                description="ClaudeResumer 命令列版：接續舊對話、在專案開新對話、排時間（docs/cli.md）")
+def _parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParser:
+    p = parser_class(prog="python -m claude_timer.cli",
+                     description="ClaudeResumer 命令列版：接續舊對話、在專案開新對話、排時間（docs/cli.md）")
     p.add_argument("--version", action="version", version=f"claude_timer {__version__}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=True, parser_class=parser_class)
 
     def add(name, fn, help_text):
         sp = sub.add_parser(name, help=help_text)
@@ -494,6 +494,30 @@ def _parser() -> argparse.ArgumentParser:
     add("fire", cmd_fire, "（工作排程器用）送出一筆").add_argument("id")
     add("stash", cmd_stash, "把那筆接續做的改動收起來").add_argument("id")
     return p
+
+
+class _QuietParser(argparse.ArgumentParser):
+    """參數錯不印到 stderr、不 exit：給 run()（Python API）用，錯誤變成 code 4 的結果。"""
+
+    def error(self, message):
+        raise CliError(EXIT_BAD, message)
+
+
+def run(argv: List[str]) -> Tuple[int, dict, str]:
+    """跑一個子指令、不印任何東西，回 (結束碼, --json 會印的那個物件, 給人看的那一行)。
+
+    CLI（main）與 Python API（claude_timer/api.py）共用這一條：同一個參數、同一個結果，兩邊不會各說各話。
+    """
+    parser = _parser(parser_class=_QuietParser)
+    try:
+        a = parser.parse_args(argv)
+        if a.cmd == "cancel" and not a.all and not a.id:
+            raise CliError(EXIT_BAD, "cancel 要給 <id> 或 --all")
+        return a.fn(a)
+    except CliError as e:
+        return e.code, {"error": e.message}, f"❌ {e.message}"
+    except SystemExit as e:  # --help／--version
+        return (EXIT_OK if e.code in (0, None) else EXIT_BAD), {}, ""
 
 
 def main(argv: Optional[List[str]] = None) -> int:
