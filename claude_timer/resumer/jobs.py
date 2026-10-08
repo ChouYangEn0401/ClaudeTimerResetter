@@ -15,11 +15,9 @@ content_hash 存起來；fire 時再算一次，不一樣就不跑——排程�
 """
 from __future__ import annotations
 
-import ctypes
 import hashlib
 import json
 import os
-import platform
 import secrets
 import threading
 from dataclasses import asdict, dataclass, field
@@ -27,7 +25,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from ..core.procs import process_created  # noqa: F401  （cli.py 以 store.process_created 取用）
 from ..paths import ensure_install_dir, install_dir
+
+BUSY_WAIT, BUSY_TAKEOVER, BUSY_FORK = "wait", "takeover", "fork"   # 到點時對話被佔用怎麼辦（見 tasks.py）
 
 SCHEDULED, WAITING, SENT, DONE, FAILED, CANCELLED = "scheduled", "waiting", "sent", "done", "failed", "cancelled"
 FINAL = (DONE, FAILED, CANCELLED)
@@ -55,6 +56,7 @@ class Job:
     disallowed_tools: str = ""
     max_budget_usd: float = 0.0
     require_clean: bool = True        # resume：工作目錄要乾淨（做完的改動才收得回來）
+    busy_policy: str = BUSY_WAIT      # resume：到點時對話被佔用——wait 等它關掉／takeover 關掉它再送／fork 分支接續
     sandbox: str = "worktree"         # new：worktree＝在獨立的 git worktree＋branch 跑；none＝直接在 cwd
     name: str = ""
     after: str = ""                   # 預留：等另一筆 job 做完才跑（「源源不絕」那一步，下一輪做）
@@ -82,7 +84,7 @@ class Job:
                 "session_id": self.session_id, "permission_mode": self.permission_mode,
                 "allowed_tools": self.allowed_tools, "disallowed_tools": self.disallowed_tools,
                 "max_budget_usd": self.max_budget_usd, "require_clean": self.require_clean,
-                "sandbox": self.sandbox}
+                "busy_policy": self.busy_policy, "sandbox": self.sandbox}
 
     def compute_hash(self) -> str:
         return hashlib.sha256(json.dumps(self.what(), sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -130,33 +132,7 @@ def all_jobs() -> List[Job]:
     return sorted(load().values(), key=lambda j: j.created, reverse=True)
 
 
-# ── 送出去的行程還活著嗎（pid＋建立時間，pid 會被重用）──────────────────────────
-
-def process_created(pid: int) -> Optional[int]:
-    if not pid:
-        return None
-    if platform.system() != "Windows":
-        try:
-            os.kill(pid, 0)
-            return 0
-        except OSError:
-            return None
-    k = ctypes.windll.kernel32
-    handle = k.OpenProcess(0x1000, False, int(pid))   # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return None
-    try:
-        code = ctypes.c_ulong()
-        k.GetExitCodeProcess(handle, ctypes.byref(code))
-        if code.value != 259:                          # STILL_ACTIVE
-            return None
-        times = [ctypes.c_ulonglong() for _ in range(4)]
-        if not k.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
-            return None
-        return int(times[0].value)
-    finally:
-        k.CloseHandle(handle)
-
+# ── 送出去的行程還活著嗎（pid＋建立時間，pid 會被重用；core/procs.py）──────────────
 
 def alive(job: Job) -> bool:
     created = process_created(job.pid)

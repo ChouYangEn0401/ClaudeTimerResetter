@@ -29,6 +29,9 @@ import json, os, sys
 args = sys.argv[1:]
 sid = args[args.index("--resume") + 1] if "--resume" in args else args[args.index("--session-id") + 1]
 prompt = args[args.index("--print") + 1]
+if os.environ.get("FAKE_CLAUDE_ARGS"):
+    with open(os.environ["FAKE_CLAUDE_ARGS"], "a", encoding="utf-8") as f:
+        f.write(json.dumps(args) + "\n")
 if os.path.exists("README.md"):
     with open("README.md", "a", encoding="utf-8") as f:
         f.write("\nchanged by claude: " + prompt + "\n")
@@ -52,6 +55,8 @@ class CliTest(unittest.TestCase):
         fake = self.tmp / "fake_claude.py"
         fake.write_text(FAKE_CLAUDE, encoding="utf-8")
         os.environ["CLAUDE_TIMER_CLAUDE_BIN"] = str(fake)
+        self.args_log = self.tmp / "claude_args.jsonl"
+        os.environ["FAKE_CLAUDE_ARGS"] = str(self.args_log)
         self.repo = self.tmp / "WebApp"
         self.repo.mkdir()
         git(self.repo, "init", "-q")
@@ -77,11 +82,25 @@ class CliTest(unittest.TestCase):
         self.holder = {}
         self._orig_holders = sessions.active_holders
         sessions.active_holders = lambda: dict(self.holder)
+        # 假的「釋放」：記下被叫了幾次、把持有者清掉（真的會 taskkill，測試裡不能跑）
+        self.released = []
+        self._orig_release = sessions.release_session
+
+        def fake_release(session_id, timeout=10.0):
+            self.released.append(session_id)
+            if self.holder.pop(session_id, None) is None:
+                return True, "目前沒有被佔用"
+            return True, "已釋放（關閉 pid 1）"
+        sessions.release_session = fake_release
 
     def tearDown(self):
         self.sessions.active_holders = self._orig_holders
+        self.sessions.release_session = self._orig_release
         os.environ.clear()
         os.environ.update(self.env_backup)
+
+    def claude_args(self):
+        return [json.loads(x) for x in self.args_log.read_text(encoding="utf-8").splitlines() if x.strip()]
 
     def run_cli(self, *args):
         from claude_timer import cli
@@ -161,6 +180,47 @@ class CliTest(unittest.TestCase):
         self.holder.clear()
         code, sent = self.run_cli("fire", job["id"])
         self.assertEqual((code, sent["status"]), (0, "done"))
+
+    # ── 被佔用時：到時接管、分支接續、只釋放 ──
+
+    def test_take_over_releases_holder_at_fire_time(self):
+        code, job = self.run_cli("resume", self.sid, "--prompt", "continue", "--at", "+1", "--take-over",
+                                 "--dry-run")
+        self.assertEqual((code, job["status"], job["busy_policy"]), (0, "scheduled", "takeover"))
+        self.assertEqual(self.released, [], "排程時不該動手，到點才接管")
+        self.holder[self.sid] = {"pid": 1, "entrypoint": "claude-vscode", "cwd": str(self.repo)}
+        code, fired = self.run_cli("fire", job["id"])
+        self.assertEqual((code, fired["status"]), (0, "done"), fired)
+        self.assertEqual(self.released, [self.sid])
+        self.assertNotIn("--fork-session", self.claude_args()[-1])
+        # 預設（wait）的那一筆照舊只等不搶
+        self.holder[self.sid] = {"pid": 1, "entrypoint": "claude-vscode", "cwd": str(self.repo)}
+        code, waiting = self.run_cli("resume", self.sid, "--prompt", "continue")
+        self.assertEqual((code, waiting["status"], waiting["busy_policy"]), (3, "waiting", "wait"))
+        self.assertEqual(self.released, [self.sid])
+
+    def test_fork_does_not_wait_and_passes_fork_session(self):
+        self.holder[self.sid] = {"pid": 1, "entrypoint": "claude-vscode", "cwd": str(self.repo)}
+        code, job = self.run_cli("resume", self.sid, "--prompt", "continue", "--fork")
+        self.assertEqual((code, job["status"], job["busy_policy"]), (0, "done", "fork"), job)
+        self.assertIn("--fork-session", self.claude_args()[-1])
+        self.assertEqual(self.released, [])
+        code, err = self.run_cli("resume", self.sid, "--prompt", "x", "--fork", "--take-over")
+        self.assertEqual(code, 4)
+
+    def test_release_verb(self):
+        code, data = self.run_cli("release", self.sid)
+        self.assertEqual((code, data["was_busy"], data["released"]), (0, False, True))
+        self.holder[self.sid] = {"pid": 1, "entrypoint": "claude-vscode", "cwd": str(self.repo), "name": "x"}
+        code, data = self.run_cli("check", self.sid)
+        self.assertEqual((code, data["busy"]), (3, True))
+        self.assertIn("VSCode", data["holder"])
+        code, data = self.run_cli("release", self.sid)
+        self.assertEqual((code, data["was_busy"], data["released"]), (0, True, True))
+        self.assertEqual(self.released, [self.sid])
+        self.assertNotIn(self.sid, self.holder)
+        code, data = self.run_cli("release", "no-such-session")
+        self.assertEqual(code, 2)
 
     # ── 新對話：獨立 worktree、不碰原本的資料夾 ──
 

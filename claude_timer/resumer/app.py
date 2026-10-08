@@ -31,17 +31,18 @@ from ..ui.scroll import ScrollableFrame
 from ..ui.theme import COLORS
 from . import journal
 from .sessions import (
-    DEFAULT_LIMIT, SessionInfo, active_holders, describe_holder, force_take_over,
+    DEFAULT_LIMIT, SessionInfo, active_holders, describe_holder, release_session,
     scan_sessions, session_holder,
 )
 from .tasks import (
-    CONFIRM_SECONDS, PERMISSION_HELP, PERMISSION_MODES, STATUS_FAILED, STATUS_LOCKED,
-    STATUS_MANUAL, STATUS_SENDING, STATUS_WAITING, Task, preflight,
+    BUSY_HELP, BUSY_LABELS, BUSY_POLICIES, BUSY_TAKEOVER, BUSY_WAIT, CONFIRM_SECONDS, PERMISSION_HELP,
+    PERMISSION_MODES, STATUS_FAILED, STATUS_LOCKED, STATUS_MANUAL, STATUS_SENDING, STATUS_WAITING, Task,
+    preflight,
 )
 from .viewer import ConversationViewer
 
 RULE_LINE = ("鐵律：送出的那一刻，該對話不能開在 VSCode 裡（session 會被鎖住）。"
-             "本工具會先幫你偵測並擋下來，不花 token，關掉之後自動補送。")
+             "本工具會先幫你偵測並擋下來，不花 token；排程時可以選「被佔用時怎麼辦」。")
 
 
 class App(tk.Tk):
@@ -65,6 +66,7 @@ class App(tk.Tk):
         self._build_ui()
         self._reload_sessions(announce=False)
         self._refresh_perm_help()
+        self._refresh_busy_help()
         self._sync_time_format()
         self._say(f"就緒。掃到 {self.total_sessions} 個對話，紀錄檔：{resumer_log()}")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -115,6 +117,8 @@ class App(tk.Tk):
         ttk.Button(row, text="重新整理", command=lambda: self._reload_sessions()).pack(side="left")
         ttk.Button(row, text="查看內容", command=self._view_conversation).pack(side="left", padx=(6, 0))
         ttk.Button(row, text="檢查可否送出", command=self._diagnose).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="釋放佔用（不送出）", style="Danger.TButton",
+                   command=self._release_selected).pack(side="left", padx=(6, 0))
 
         wrap = ttk.Frame(card, style="Card.TFrame")
         wrap.pack(fill="both", expand=True, pady=(8, 0))
@@ -199,23 +203,35 @@ class App(tk.Tk):
                   style="Muted.TLabel", wraplength=920, justify="left").grid(
             row=5, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(2, 0))
 
-        ttk.Label(card, text="權限模式：", style="Card.TLabel").grid(row=6, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(card, text="被佔用時：", style="Card.TLabel").grid(row=6, column=0, sticky="w", pady=(12, 0))
+        self.busy_var = tk.StringVar(value=BUSY_WAIT)
+        busy_box = ttk.Frame(card, style="Card.TFrame")
+        busy_box.grid(row=6, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(12, 0))
+        for value in BUSY_POLICIES:
+            ttk.Radiobutton(busy_box, text=BUSY_LABELS[value], variable=self.busy_var, value=value,
+                            command=self._refresh_busy_help).pack(side="left", padx=(0, 12))
+        self.busy_help_var = tk.StringVar()
+        ttk.Label(card, textvariable=self.busy_help_var, style="Muted.TLabel",
+                  wraplength=920, justify="left").grid(
+            row=7, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(2, 0))
+
+        ttk.Label(card, text="權限模式：", style="Card.TLabel").grid(row=8, column=0, sticky="w", pady=(12, 0))
         self.perm_var = tk.StringVar(value=PERMISSION_MODES[0])
         combo = ttk.Combobox(card, textvariable=self.perm_var, state="readonly",
                              values=PERMISSION_MODES, width=20)
-        combo.grid(row=6, column=1, sticky="w", padx=(8, 0), pady=(12, 0))
+        combo.grid(row=8, column=1, sticky="w", padx=(8, 0), pady=(12, 0))
         combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_perm_help())
         self.perm_help_var = tk.StringVar()
         ttk.Label(card, textvariable=self.perm_help_var, style="Muted.TLabel",
                   wraplength=920, justify="left").grid(
-            row=7, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(4, 0))
+            row=9, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(4, 0))
 
         self.selected_var = tk.StringVar(value="尚未選擇對話")
         ttk.Label(card, textvariable=self.selected_var, style="Muted.TLabel",
-                  wraplength=700, justify="left").grid(row=8, column=0, columnspan=2,
+                  wraplength=700, justify="left").grid(row=10, column=0, columnspan=2,
                                                        sticky="w", pady=(14, 0))
         ttk.Button(card, text="加入排程佇列", style="Accent.TButton",
-                   command=self._add_task).grid(row=8, column=3, sticky="e", pady=(14, 0))
+                   command=self._add_task).grid(row=10, column=3, sticky="e", pady=(14, 0))
 
     def _build_queue_card(self, parent) -> None:
         card = self._card(parent, "③ 排程佇列")
@@ -250,11 +266,13 @@ class App(tk.Tk):
         btns.pack(fill="x", pady=(8, 0))
         ttk.Button(btns, text="移除選取", command=self._remove_task).pack(side="left")
         ttk.Button(btns, text="立即送出", command=self._send_now_selected).pack(side="left", padx=(6, 0))
-        ttk.Button(btns, text="強制接管並送出", style="Danger.TButton",
+        ttk.Button(btns, text="改成「到時接管」", command=self._mark_take_over_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(btns, text="立刻接管並送出", style="Danger.TButton",
                    command=self._force_take_over_selected).pack(side="left", padx=(6, 0))
         self.autoclose_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(btns, text="全部送出後自動關閉視窗", variable=self.autoclose_var).pack(side="right")
-        ttk.Label(card, text="「強制接管」會直接關掉正開著那個對話的行程（未存的東西會一起沒掉），趕時間才用；"
+        ttk.Label(card, text="「立刻接管並送出」是**現在**就關掉開著那個對話的行程、馬上送，不等排定的時間；"
+                             "「改成到時接管」只是把那筆標成：時間到若還被佔用就接管後送出（跟上面「被佔用時」選第二項一樣）。"
                              "平常讓它被擋下、你關掉 VSCode 後自動補送就好。",
                   style="Muted.TLabel", wraplength=1000, justify="left").pack(anchor="w", pady=(6, 0))
 
@@ -371,6 +389,27 @@ class App(tk.Tk):
         else:
             self._say(f"[檢查] ✓ 可以送：{session.project}（{session.session_id}，目前沒有被佔用）")
 
+    def _release_selected(self) -> None:
+        """只把佔用這個對話的行程關掉，不送任何東西：用完了、想讓 resumer 之後接得上，就按這個。"""
+        session = self._selected_session()
+        if session is None:
+            return
+        holder = session_holder(session.session_id)
+        if holder is None:
+            self._say(f"[釋放] {session.display}：目前沒有被佔用，不用釋放")
+            return
+        if not messagebox.askyesno(
+            "確認釋放佔用",
+            f"這個對話{describe_holder(holder)}。\n\n"
+            f"釋放會直接關閉那個行程（pid {holder['pid']}），它裡面沒存或正在跑的東西會一起遺失；"
+            f"不會送出任何東西。\n\n確定要釋放嗎？",
+            parent=self,
+        ):
+            return
+        ok, message = release_session(session.session_id)
+        self._say(f"[釋放] {session.display}：{message}")
+        self._refresh_session_list()
+
     def _attach_file(self) -> None:
         path = filedialog.askopenfilename(title="選擇要附加的檔案", parent=self)
         if path:
@@ -434,10 +473,12 @@ class App(tk.Tk):
                                  parent=self)
             return
 
-        task = Task(session, prompt, when, self.mode_var.get(), self.perm_var.get())
+        task = Task(session, prompt, when, self.mode_var.get(), self.perm_var.get(),
+                    busy_policy=self.busy_var.get())
         self.tasks.append(task)
         self._refresh_queue()
-        self._say(f"已排入 {when.strftime('%m-%d %H:%M:%S')}：{session.project}（task={task.id}）")
+        self._say(f"已排入 {when.strftime('%m-%d %H:%M:%S')}：{session.display}（task={task.id}，"
+                  f"被佔用時：{BUSY_LABELS[task.busy_policy]}）")
         for p in preflight(session):
             self._say(f"[警告] 這筆現在就有問題，時間到大概會失敗：{p}")
 
@@ -495,8 +536,20 @@ class App(tk.Tk):
         self._fire(task, note="手動立即送出")
         self._refresh_queue()
 
+    def _mark_take_over_selected(self) -> None:
+        """不是現在動手：把這筆標成「時間到若被佔用就接管後送出」，定時才有意義。"""
+        task = self._selected_task()
+        if task is None:
+            return
+        if task.settled:
+            self._say(f"task={task.id} 已經是最終狀態（{task.status}），改不了")
+            return
+        task.busy_policy = BUSY_TAKEOVER
+        self._refresh_queue()
+        self._say(f"task={task.id} 改成：{task.when.strftime('%H:%M:%S')} 到了若還被佔用，接管後送出")
+
     def _force_take_over_selected(self) -> None:
-        """主動搶占選取任務的 session：關掉持有它的行程後再送出。破壞性，先跳確認。"""
+        """**現在**就搶占選取任務的 session：關掉持有它的行程後立刻送出，不等排定時間。破壞性，先跳確認。"""
         task = self._selected_task()
         if task is None:
             return
@@ -505,18 +558,19 @@ class App(tk.Tk):
             return
         holder = session_holder(task.session.session_id)
         if holder is None:
-            self._fire(task, note="強制接管（其實沒被佔用，直接送）")
+            self._fire(task, note="立刻接管（其實沒被佔用，直接送）")
             self._refresh_queue()
             return
         if not messagebox.askyesno(
-            "確認強制接管",
+            "確認立刻接管",
             f"這個對話{describe_holder(holder)}。\n\n"
-            f"強制接管會直接關閉那個行程（pid {holder['pid']}），"
-            f"它裡面沒存或正在跑的東西會一起遺失。\n\n確定要接管並送出嗎？",
+            f"立刻接管會現在就關閉那個行程（pid {holder['pid']}），"
+            f"它裡面沒存或正在跑的東西會一起遺失，然後馬上送出、不等排定的 {task.when.strftime('%H:%M:%S')}。\n\n"
+            f"只想標成「時間到再接管」的話請按「改成「到時接管」」。\n\n確定要現在接管並送出嗎？",
             parent=self,
         ):
             return
-        ok, message = force_take_over(task.session.session_id)
+        ok, message = release_session(task.session.session_id)
         self._say(f"[接管] task={task.id}：{message}")
         if ok:
             self._fire(task, note="接管後送出")
@@ -542,6 +596,9 @@ class App(tk.Tk):
 
     def _refresh_perm_help(self) -> None:
         self.perm_help_var.set(PERMISSION_HELP.get(self.perm_var.get(), ""))
+
+    def _refresh_busy_help(self) -> None:
+        self.busy_help_var.set(BUSY_HELP.get(self.busy_var.get(), ""))
 
     # ---------- 計時迴圈 ----------
 
@@ -608,7 +665,7 @@ class App(tk.Tk):
         failed = sum(1 for t in self.tasks if t.status == STATUS_FAILED)
         parts = [f"待處理 {pending}"]
         if locked:
-            parts.append(f"被佔用 {locked}（關掉 VSCode 那個對話就會自動補送）")
+            parts.append(f"被佔用 {locked}（關掉或釋放那個對話就會自動補送）")
         if failed:
             parts.append(f"失敗 {failed}（視窗不會自動關，錯誤在上面的狀況欄）")
         self.status_var.set("｜".join(parts))

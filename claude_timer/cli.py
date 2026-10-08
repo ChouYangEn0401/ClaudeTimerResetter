@@ -4,7 +4,9 @@
     python -m claude_timer.cli sessions [--cwd 資料夾] [--limit N] [--all]  本機的對話清單（預設藏暫存／程式用的）
     python -m claude_timer.cli show <session> [--turns N]                  一個對話的摘要；--turns 多印最近 N 輪（不花錢）
     python -m claude_timer.cli check <session>                             送出前檢查（不花錢）
+    python -m claude_timer.cli release <session>                           把佔用這個對話的 Claude Code 關掉，不送出（不花錢）
     python -m claude_timer.cli resume <session> --prompt … [--at 時間]      接續舊對話（沒給 --at 就現在送）
+                                   [--take-over | --fork]                  到點被佔用時：關掉持有者再送／不搶、開新的對話 id
     python -m claude_timer.cli new --cwd 資料夾 --prompt … [--at 時間]      在專案開一個全新的對話做新任務
     python -m claude_timer.cli jobs | job <id> | cancel <id>|--all         看排程、看結果、取消
     python -m claude_timer.cli stash <id>                                  把那筆接續做的改動收起來（git stash，找得回來）
@@ -17,7 +19,8 @@
 `fire <id>`；對話被佔用時每 2 分鐘補試、最多 1 小時；電腦那時是關的，開機後補跑。
 
 「跑的是什麼」的限制做在這裡（誰能下令由呼叫的那一方決定，例如 ClawBot 的驗證碼與風險分級）：
-- 內容釘死：建立時算 content_hash，fire 時不一樣就不跑。
+- 內容釘死：建立時算 content_hash（含 busy_policy），fire 時不一樣就不跑。
+- 被佔用時預設只等不搶：--take-over 是建立時就講好的（到點才關掉持有者），release 是現在就關、不送。
 - new 預設 --sandbox worktree：在獨立的 git worktree＋branch（resume/<id>）跑，不碰你的工作目錄。
 - resume 預設 --require-clean：工作目錄要乾淨，記下起點 commit，做完可以 `stash <id>` 收回來。
 - --allowed-tools／--disallowed-tools／--max-budget-usd 原樣交給 claude。
@@ -169,7 +172,16 @@ def fire(job: store.Job) -> int:
         if problems:
             return _fail(job, "；".join(problems))
         holder = sess.session_holder(job.session_id)
-        if holder:
+        fork = job.busy_policy == store.BUSY_FORK
+        if holder and job.busy_policy == store.BUSY_TAKEOVER:
+            # 排程時就講好「到點若被佔用就接管」：關掉持有它的行程，鎖釋放了才送
+            ok, message = sess.release_session(job.session_id)
+            if not ok:
+                job.status, job.error = store.WAITING, f"到時接管失敗：{message}；排程會再試"
+                store.update(job)
+                return EXIT_WAIT
+            holder = None
+        if holder and not fork:
             job.status, job.error = store.WAITING, f"{sess.describe_holder(holder)}；關掉之後會自動補送"
             store.update(job)
             return EXIT_WAIT
@@ -181,7 +193,7 @@ def fire(job: store.Job) -> int:
             start_commit = _git(run_cwd, "rev-parse", "HEAD")[1]
         argv = build_argv(job.prompt, resume=job.session_id, permission_mode=job.permission_mode,
                           allowed_tools=job.allowed_tools, disallowed_tools=job.disallowed_tools,
-                          max_budget_usd=job.max_budget_usd or None, output_json=True)
+                          max_budget_usd=job.max_budget_usd or None, output_json=True, fork_session=fork)
     else:
         if not Path(job.cwd).is_dir():
             return _fail(job, f"資料夾不存在：{job.cwd}")
@@ -300,10 +312,25 @@ def cmd_check(a):
     problems = preflight(s)
     holder = sess.session_holder(s.session_id)
     if holder:
-        problems.append(f"{sess.describe_holder(holder)}（送出時要關掉，或等它自動補送）")
-    data = {"session_id": s.session_id, "ok": not problems, "problems": problems, "busy": bool(holder)}
+        problems.append(f"{sess.describe_holder(holder)}（送出時要關掉、用 release 釋放，或等它自動補送）")
+    data = {"session_id": s.session_id, "ok": not problems, "problems": problems, "busy": bool(holder),
+            "holder": sess.describe_holder(holder) if holder else "",
+            "holder_state": sess.holder_state(holder) if holder else ""}
     code = EXIT_OK if not problems else (EXIT_WAIT if holder and len(problems) == 1 else EXIT_FAILED)
     return code, data, "可以送出" if not problems else "\n".join(problems)
+
+
+def cmd_release(a):
+    """把佔用這個對話的 Claude Code 行程關掉，不送任何東西。用完了、想讓之後的接續接得上，就用這個。"""
+    s = find_session(a.session)
+    holder = sess.session_holder(s.session_id)
+    if holder is None:
+        return EXIT_OK, {"session_id": s.session_id, "was_busy": False, "released": True,
+                         "message": "目前沒有被佔用"}, "目前沒有被佔用，不用釋放"
+    described = sess.describe_holder(holder)
+    ok, message = sess.release_session(s.session_id)
+    data = {"session_id": s.session_id, "was_busy": True, "released": ok, "message": message, "holder": described}
+    return (EXIT_OK if ok else EXIT_FAILED), data, f"{described}\n{message}"
 
 
 def _common_job(a, kind: str, cwd: str, session_id: str) -> store.Job:
@@ -316,8 +343,11 @@ def _common_job(a, kind: str, cwd: str, session_id: str) -> store.Job:
 
 def cmd_resume(a):
     s = find_session(a.session)
+    if a.take_over and a.fork:
+        raise CliError(EXIT_BAD, "--take-over 跟 --fork 只能選一個（一個是關掉持有者，一個是不搶、開新 id）")
     job = _common_job(a, "resume", s.cwd, s.session_id)
     job.require_clean = not a.no_require_clean
+    job.busy_policy = store.BUSY_TAKEOVER if a.take_over else (store.BUSY_FORK if a.fork else store.BUSY_WAIT)
     at = parse_at(a.at)
     job.at = at.isoformat(timespec="seconds") if at else ""
     code, xml = schedule_or_fire(job, at, a.dry_run)
@@ -446,6 +476,11 @@ def _parser() -> argparse.ArgumentParser:
     sp.add_argument("session")
     task_flags(sp)
     sp.add_argument("--no-require-clean", action="store_true", help="工作目錄有沒 commit 的改動也照送")
+    sp.add_argument("--take-over", action="store_true",
+                    help="到點時對話若正被別的 Claude Code 開著（例如 VSCode），關掉它再送（破壞性；預設是等它關掉）")
+    sp.add_argument("--fork", action="store_true",
+                    help="不搶佔：用 --fork-session 續在一個新的對話 id 底下，原本的可以留著開（未實測）")
+    add("release", cmd_release, "把佔用這個對話的 Claude Code 關掉，不送出").add_argument("session")
     sp = add("new", cmd_new, "在專案開一個全新的對話")
     sp.add_argument("--cwd", required=True)
     sp.add_argument("--name", default="")

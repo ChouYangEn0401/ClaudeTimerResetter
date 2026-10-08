@@ -26,10 +26,29 @@ from pathlib import Path
 
 from ..paths import ensure_install_dir, resume_task_log
 from . import journal
+from .jobs import BUSY_FORK, BUSY_TAKEOVER, BUSY_WAIT
 from .launch import CONFIRM_SECONDS, build_argv, claude_prefix, start_detached
-from .sessions import SessionInfo, describe_holder, session_holder
+from .sessions import SessionInfo, describe_holder, release_session, session_holder
 
 PERMISSION_MODES = ["(不覆寫)", "acceptEdits", "bypassPermissions", "dontAsk", "plan"]
+
+# 到點時那個對話正被別的 Claude Code 開著（最常見：還開在 VSCode）要怎麼辦。
+# 以前只有「等它關掉再補送」跟一顆立刻執行的「強制接管並送出」；本人（2026-10-08）要的是
+# 「排程時就先講好：時間到若還被佔用就接管」，不然定時就沒有意義。
+BUSY_POLICIES = (BUSY_WAIT, BUSY_TAKEOVER, BUSY_FORK)
+BUSY_LABELS = {
+    BUSY_WAIT: "等它關掉再補送",
+    BUSY_TAKEOVER: "時間到就強制接管",
+    BUSY_FORK: "分支接續（未實測）",
+}
+BUSY_HELP = {
+    BUSY_WAIT: "時間到若被佔用就先擋下、標成「被佔用」，你一關掉那個對話下一秒自動補送。最安全，預設。",
+    BUSY_TAKEOVER: "時間到若被佔用，直接關掉開著它的那個行程（VSCode 那個對話框會斷線，沒存／正在跑的東西會沒掉），"
+                   "鎖一釋放就送出。要的是「定時一定要送」就選這個。",
+    BUSY_FORK: "不搶佔：用 --fork-session 接續，續在一個新的對話 id 底下，原本的對話框可以留著開。"
+               "代價是接續的那一段不會出現在原本的對話框裡；而且這條路還沒在真的 claude 上驗證過能不能繞過鎖。",
+}
+BUSY_SHORT = {BUSY_WAIT: "", BUSY_TAKEOVER: "·到時接管", BUSY_FORK: "·分支"}
 
 # 每個權限模式的說明（GUI 即時顯示）。resumer 是 --print 非互動執行，沒有人能回應
 # 中途的權限提示，所以這個下拉在這裡比想像中重要。
@@ -97,13 +116,14 @@ def preflight(session: SessionInfo) -> list[str]:
 
 class Task:
     def __init__(self, session: SessionInfo, prompt: str, when: datetime, mode: str,
-                 permission_mode: str) -> None:
+                 permission_mode: str, busy_policy: str = BUSY_WAIT) -> None:
         self.id = uuid.uuid4().hex[:8]
         self.session = session
         self.prompt = prompt
         self.when = when
         self.mode = mode                      # "auto" | "manual"
         self.permission_mode = permission_mode  # "(不覆寫)" 表示不加這個參數
+        self.busy_policy = busy_policy if busy_policy in BUSY_POLICIES else BUSY_WAIT
         self.status = STATUS_WAITING
         self.error: str | None = None
         self.proc: subprocess.Popen | None = None
@@ -114,7 +134,7 @@ class Task:
 
     def row(self) -> tuple[str, ...]:
         """Treeview 的一列：時間 / 專案 / 要送出的內容 / 方式 / 狀態。"""
-        mode = "自動" if self.mode == "auto" else "手動確認"
+        mode = ("自動" if self.mode == "auto" else "手動確認") + BUSY_SHORT.get(self.busy_policy, "")
         return (
             self.when.strftime("%m-%d %H:%M:%S"),
             self.session.display,
@@ -146,13 +166,25 @@ class Task:
             return False
 
         holder = session_holder(self.session.session_id)
+        fork = False
         if holder:
-            self.status = STATUS_LOCKED
-            self.error = f"{describe_holder(holder)}，請關閉後它會自動補送"
-            return False
+            if self.busy_policy == BUSY_TAKEOVER:
+                ok, message = release_session(self.session.session_id)
+                journal.write(f"RELEASE task={self.id} {message}")
+                if not ok:
+                    self.status = STATUS_LOCKED
+                    self.error = f"到時接管失敗：{message}；會再試"
+                    return False
+            elif self.busy_policy == BUSY_FORK:
+                fork = True   # 不搶佔，續在新的對話 id 底下
+            else:
+                self.status = STATUS_LOCKED
+                self.error = f"{describe_holder(holder)}，請關閉後它會自動補送"
+                return False
 
         try:
-            args = build_argv(self.prompt, resume=self.session.session_id, permission_mode=self.permission_mode)
+            args = build_argv(self.prompt, resume=self.session.session_id, permission_mode=self.permission_mode,
+                              fork_session=fork)
         except Exception as e:
             self._fail(f"取得 claude 執行檔失敗：{e}")
             return False
@@ -168,7 +200,7 @@ class Task:
         self.error = None
         self.fired_at = time.monotonic()
         journal.write(f"FIRE task={self.id} session={self.session.session_id} "
-                      f"cwd={self.session.cwd} prompt={self.prompt[:60]!r}")
+                      f"cwd={self.session.cwd} prompt={self.prompt[:60]!r}" + (" fork" if fork else ""))
         return True
 
     def poll(self) -> bool:

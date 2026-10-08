@@ -19,7 +19,6 @@ worktree 分身跟主專案同名。清單上全部混在一起就是「一堆�
 """
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import platform
@@ -29,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from ..core.procs import process_image, same_process
 from ..paths import projects_dir, sessions_dir
 
 # 清單預設只帶最近這麼多個對話：768 個對話檔全部開來讀會讓視窗開啟卡住好幾秒，
@@ -296,28 +296,29 @@ def _plain_user_text(rec: dict) -> str | None:
 
 # ---------- 「這個對話現在有沒有人開著」 ----------
 
-def _pid_alive_claude(pid: int) -> bool:
-    """這個 pid 還活著、而且看起來真的是 claude（避免 pid 被別的程式重用時誤判）。
+def _holder_alive(pid: int, proc_start) -> bool:
+    """這份 <pid>.json 的行程還在嗎？
 
-    非 Windows 或查不到映像名稱時，保守地當作「還活著」——寧可多擋一次（提醒使用者
-    確認），也不要漏掉「其實正被佔用」而白送一次必然失敗的接續。
+    pid 會被作業系統重用：以前只看「pid 活著而且叫 claude」，VSCode 開開關關幾次之後，別的對話的
+    claude 行程拿到同一個 pid，這份殘留檔就會讓一個早就關掉的對話一直顯示「被佔用」，怎麼關都
+    釋放不了（2026-10-08 本人踩到）。Claude Code 2.1.29x 會把行程建立時間寫進 procStart，
+    跟 GetProcessTimes 對得上才算同一個行程；沒有 procStart 的舊版才退回看執行檔名。
+
+    非 Windows 或查不到時保守地當作「還活著」——寧可多擋一次，也不要白送一次必然失敗的接續。
     """
     if platform.system() != "Windows":
         return True
     try:
-        k = ctypes.windll.kernel32
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
-        if not h:
+        created = int(proc_start) if proc_start else 0
+    except (TypeError, ValueError):
+        created = 0
+    try:
+        if created:
+            return same_process(int(pid), created)
+        image = process_image(int(pid))
+        if image is None:
             return False  # 開不了＝行程不在了＝這份 session 檔是殘留
-        try:
-            buf = ctypes.create_unicode_buffer(1024)
-            size = ctypes.c_uint(1024)
-            ok = k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
-            name = buf.value.lower() if ok else ""
-            return ("claude" in name) or (name == "")
-        finally:
-            k.CloseHandle(h)
+        return ("claude" in image) or (image == "")
     except Exception:
         return True
 
@@ -325,9 +326,9 @@ def _pid_alive_claude(pid: int) -> bool:
 def active_holders() -> dict[str, dict]:
     """一次讀完 ~/.claude/sessions/，回傳 {sessionId: 持有者資訊}。
 
-    每個正在跑的 Claude Code 行程（含 VSCode 擴充）都會寫一份 <pid>.json，裡面有它
-    現在開著的 sessionId。整份一次讀進來，清單上幾百列就不用各自再掃一次資料夾。
-    純讀本機檔案，不花任何 token。
+    每個正在跑的 Claude Code 行程（含 VSCode 擴充）都會寫一份 <pid>.json，裡面有它現在開著的
+    sessionId、行程建立時間、狀態（idle／busy）與最後一次動作的時間。整份一次讀進來，清單上
+    幾百列就不用各自再掃一次資料夾。純讀本機檔案，不花任何 token。
     """
     d = sessions_dir()
     if not d.exists():
@@ -340,13 +341,15 @@ def active_holders() -> dict[str, dict]:
             continue
         sid = rec.get("sessionId")
         pid = rec.get("pid")
-        if not sid or not pid or not _pid_alive_claude(pid):
+        if not sid or not pid or not _holder_alive(pid, rec.get("procStart")):
             continue
         holders[sid] = {
             "pid": pid,
             "entrypoint": rec.get("entrypoint", "?"),
             "cwd": rec.get("cwd", ""),
             "name": rec.get("name", ""),
+            "status": rec.get("status", ""),
+            "updated_at": rec.get("statusUpdatedAt") or rec.get("updatedAt") or 0,
         }
     return holders
 
@@ -354,32 +357,51 @@ def active_holders() -> dict[str, dict]:
 def session_holder(session_id: str) -> dict | None:
     """這個 session 現在是不是正被某個活著的 Claude Code 行程佔用？
 
-    回傳持有者資訊（pid / entrypoint / cwd），沒有被佔用則回 None。
+    回傳持有者資訊（pid / entrypoint / cwd / status），沒有被佔用則回 None。
     """
     return active_holders().get(session_id)
+
+
+def holder_state(holder: dict) -> str:
+    """「閒置中（最後動作 25 分鐘前）」或「正在跑」：要不要釋放它，看這一句最準。"""
+    status = str(holder.get("status") or "")
+    updated = holder.get("updated_at") or 0
+    since = ""
+    try:
+        if updated:
+            since = humanize_since(float(updated) / 1000.0)
+    except (TypeError, ValueError):
+        since = ""
+    if status == "idle":
+        return f"閒置中（最後動作 {since}）" if since else "閒置中"
+    if status == "busy":
+        return f"正在跑（{since}）" if since else "正在跑"
+    return ""
 
 
 def describe_holder(holder: dict) -> str:
     where = "VSCode" if str(holder.get("entrypoint", "")).endswith("vscode") else holder.get("entrypoint", "?")
     name = f"「{holder['name']}」" if holder.get("name") else ""
-    return f"目前正開在 {where}（pid {holder['pid']}）{name}"
+    state = holder_state(holder)
+    return f"目前正開在 {where}（pid {holder['pid']}）{name}" + (f"，{state}" if state else "")
 
 
-def force_take_over(session_id: str, timeout: float = 10.0) -> tuple[bool, str]:
-    """主動搶占：強制關掉正持有這個 session 的行程，等鎖真的釋放。
+def release_session(session_id: str, timeout: float = 10.0) -> tuple[bool, str]:
+    """把佔用這個對話的行程關掉、等鎖真的釋放。**不送任何東西**。
 
-    Claude Code 的鎖是「誰的行程還活著誰持有」，沒有禮貌接管的 API——要拿走只能讓
-    現在的持有者結束。所以這裡直接 taskkill 那個 pid（破壞性：那個對話在 VSCode 裡
-    沒存 / 正在跑的東西會一起沒掉），然後輪詢 session_holder() 直到回 None 才算接管
-    成功。kill 之後 VSCode 擴充有可能馬上重連把 session 搶回去，所以會等到逾時；
-    逾時仍未釋放就回失敗，讓呼叫端不要硬送一次必然失敗的接續。
+    Claude Code 的鎖是「誰的行程還活著誰持有」，沒有禮貌接管的 API——要拿走只能讓現在的持有者
+    結束。所以這裡直接 taskkill 那個 pid（破壞性：那個對話在 VSCode 裡沒存／正在跑的東西會一起
+    沒掉），然後輪詢 session_holder() 直到回 None 才算釋放成功。kill 之後 VSCode 擴充有可能馬上
+    重連把 session 搶回去，所以會等到逾時；逾時仍未釋放就回失敗，讓呼叫端不要硬送一次必然失敗的接續。
+
+    「立刻接管並送出」＝ release_session() 成功之後再 fire；「只釋放」就只做這一步。
     """
     holder = session_holder(session_id)
     if holder is None:
-        return True, "目前沒有被佔用，可直接送出"
+        return True, "目前沒有被佔用"
     pid = holder.get("pid")
     if not pid:
-        return False, "持有者資訊沒有 pid，無法接管"
+        return False, "持有者資訊沒有 pid，無法釋放"
     try:
         subprocess.run(["taskkill", "/PID", str(pid), "/F"],
                        capture_output=True, text=True,
@@ -389,6 +411,6 @@ def force_take_over(session_id: str, timeout: float = 10.0) -> tuple[bool, str]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if session_holder(session_id) is None:
-            return True, f"已接管（關閉 pid {pid}）"
+            return True, f"已釋放（關閉 pid {pid}）"
         time.sleep(0.3)
     return False, f"關了 pid {pid}，但鎖還沒釋放（可能 VSCode 又重連），請稍後再試"

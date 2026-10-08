@@ -2,6 +2,7 @@
 """launch.py — 把一句話送進 Claude Code 的唯一實作（GUI 的 Task.fire 與 CLI 共用）。
 
     claude --resume <session-id> --print "<要說的話>"         接續舊對話
+    claude --resume <session-id> --fork-session --print …     接續但開成新的對話 id（原本那個可以留著開；未實測）
     claude --session-id <新的 uuid> --print "<任務>"          在專案開一個全新的對話（id 先決定好，之後才找得到它）
 
 兩個關鍵條件，錯一個就等於白送（見 tasks.py 開頭）：cwd 一定要是那個對話自己的專案資料夾；送出那一刻
@@ -33,10 +34,14 @@ def claude_prefix() -> List[str]:
 def build_argv(prompt: str, *, resume: Optional[str] = None, session_id: Optional[str] = None,
                permission_mode: Optional[str] = None, allowed_tools: Optional[str] = None,
                disallowed_tools: Optional[str] = None, max_budget_usd: Optional[float] = None,
-               output_json: bool = False) -> List[str]:
+               output_json: bool = False, fork_session: bool = False) -> List[str]:
     argv = claude_prefix()
     if resume:
         argv += ["--resume", resume]
+        if fork_session:
+            # 續在一個新的對話 id 底下（claude 2.1.293 的 --fork-session）：原本那個對話可以留著開在 VSCode。
+            # 代價：接續的那一段不會出現在原本的對話框裡；能不能繞過「session 被佔用」的鎖還沒實測。
+            argv.append("--fork-session")
     elif session_id:
         argv += ["--session-id", session_id]
     argv += ["--print", prompt]
