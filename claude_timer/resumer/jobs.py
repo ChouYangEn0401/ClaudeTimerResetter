@@ -20,10 +20,12 @@ import json
 import os
 import secrets
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional
 
 from ..core.procs import process_created  # noqa: F401  （cli.py 以 store.process_created 取用）
 from ..paths import ensure_install_dir, install_dir
@@ -99,26 +101,92 @@ def new_id() -> str:
     return secrets.token_hex(4)
 
 
-def load() -> Dict[str, Job]:
+@contextmanager
+def _file_lock(timeout: float = 20.0) -> Iterator[None]:
+    """跨行程的鎖：同一時間只有一個行程在「讀－改－寫」resume_jobs.json。
+
+    為什麼要：ClawBot 可能同時派兩筆、工作排程器可能同一分鐘觸發好幾筆，每一筆都是一個獨立的 CLI 行程。
+    以前只有行程內的鎖，兩個行程各自讀到同一份、各自寫回去，後寫的會蓋掉先寫的那一筆（job 憑空消失）；
+    而且其中一個剛好在另一個 os.replace 的那一瞬間讀檔，會拿到 PermissionError、當成空的，寫回去就整份清空。
+    （2026-10-08：ClawBot 的 tests/test_resumer_link.py 兩筆工作重疊時抓到的。）
+    """
+    ensure_install_dir()
+    fh = open(install_dir() / "resume_jobs.lock", "a+b")
+    deadline = time.monotonic() + timeout
     try:
-        raw = json.loads(jobs_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise TimeoutError("等 resume_jobs.json 的鎖等太久（別的 ClaudeResumer 行程卡住了？）")
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fh.close()
+
+
+def load() -> Dict[str, Job]:
+    """讀 job 清單。檔案不存在＝空的；別的行程正在換檔（Windows 的 PermissionError）就等一下再讀，
+    **不能**當成空的——呼叫端接著寫回去，整份就沒了。內容壞掉的檔案改名留證據，再當成空的。"""
+    path = jobs_path()
+    for attempt in range(40):
+        try:
+            text = path.read_text(encoding="utf-8")
+            break
+        except FileNotFoundError:
+            return {}
+        except PermissionError:
+            if attempt == 39:
+                raise
+            time.sleep(0.05)
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        try:
+            path.replace(path.with_name(f"resume_jobs.corrupt-{int(time.time())}.json"))
+        except OSError:
+            pass
         return {}
     known = {f for f in Job.__dataclass_fields__}
     return {k: Job(**{f: v for f, v in d.items() if f in known}) for k, d in raw.items()}
 
 
 def save(jobs: Dict[str, Job]) -> None:
-    """原子寫入：先寫暫存檔再取代，寫到一半當掉也不會留下半個 JSON。"""
+    """原子寫入：先寫暫存檔再取代，寫到一半當掉也不會留下半個 JSON。暫存檔帶 pid，兩個行程不會搶同一個。"""
     ensure_install_dir()
     path = jobs_path()
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_name(f"resume_jobs.{os.getpid()}.tmp")
     tmp.write_text(json.dumps({k: asdict(v) for k, v in jobs.items()}, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    for attempt in range(40):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:  # 別的行程剛好在讀
+            if attempt == 39:
+                raise
+            time.sleep(0.05)
 
 
 def update(job: Job) -> None:
-    with _LOCK:
+    with _LOCK, _file_lock():
         jobs = load()
         jobs[job.id] = job
         save(jobs)
