@@ -8,3 +8,6 @@ dist/
 # 打包設定，跟原始碼同進退，一定要留著（見 build.bat）。
 *.spec
 !packaging/*.spec
+
+# 機密：永遠不進版控
+.env
