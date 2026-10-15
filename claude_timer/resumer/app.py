@@ -570,6 +570,7 @@ class App(tk.Tk):
             parent=self,
         ):
             return
+        self._say(f"[快照] task={task.id}：{task.take_snapshot('接管前')}")   # 關掉之前先存（v1.5）
         ok, message = release_session(task.session.session_id, allow_busy=True)   # 人看過狀態、自己按的
         self._say(f"[接管] task={task.id}：{message}")
         if ok:
