@@ -21,7 +21,7 @@ scripts\ctr.bat job <id>                                 :: 做完了沒、它�
 | `sessions [--cwd 資料夾] [--limit N] [--all]` | 本機的對話（標題、最後一句、最後活動、分支、來源、是不是正開著）。預設藏起暫存資料夾與程式自己工作區裡的對話，`--all` 才列；指定 `--cwd` 時不過濾 | 不花 |
 | `show <session> [--turns N]` | 一個對話的摘要：期間、幾輪、則數、最後你說了什麼、它回了什麼；`--turns N` 多印最近 N 輪（你說的整段、中間過程一行摘要、它最後回的整段） | 不花 |
 | `check <session>` | 送出前檢查：執行檔、對話檔、資料夾、有沒有被佔用（佔用的那個閒置多久） | 不花 |
-| `release <session>` | 把佔用這個對話的 Claude Code 行程關掉，**不送出**（破壞性：那個對話沒存的東西會沒掉） | 不花 |
+| `release <session> [--even-busy]` | 把佔用這個對話的 Claude Code 行程（連子程序）關掉，**不送出**（破壞性）。預設只關閒著的；`--even-busy` 連正在跑的也關；程式開的（`claude -p`）一律不關 | 不花 |
 | `resume <session> --prompt … [--at 時間] [--take-over \| --fork]` | 接續舊對話；沒給 `--at` 就現在送。`--take-over`＝到點若被佔用就關掉持有者再送；`--fork`＝不搶，用 `--fork-session` 續在新的對話 id 底下（未實測） | 花 |
 | `new --cwd 資料夾 --prompt … [--at 時間]` | 在專案開一個**全新的對話**做新任務（新的 session id 先決定好，之後可以再 resume 它） | 花 |
 | `jobs` / `job <id>` | 排程清單／一筆的結果（含 `git diff --stat` 的改動摘要） | 不花 |
@@ -31,7 +31,8 @@ scripts\ctr.bat job <id>                                 :: 做完了沒、它�
 
 時間（`--at`）：`+30`（30 分鐘後）、`09:00`（今天，過了就明天）、`2026-10-04 09:00`。
 
-共用選項：`--permission-mode`（預設 `acceptEdits`；`plan`／`bypassPermissions`／`dontAsk`／`auto`／`default`）、
+共用選項：`--permission-mode`（`resume` 預設 `inherit`＝照那個對話最後一次互動時的權限模式、模型、effort，
+`bypassPermissions` 不沿用；`new` 預設 `acceptEdits`；其他：`auto`／`plan`／`bypassPermissions`／`dontAsk`／`default`）、
 `--allowed-tools`、`--disallowed-tools`、`--max-budget-usd`（都原樣交給 claude）、`--dry-run`（排時間時只產生
 工作排程的 XML，不真的註冊）。`resume` 另有 `--no-require-clean`；`new` 另有 `--sandbox worktree|none`、`--name`。
 
@@ -62,6 +63,7 @@ scripts\ctr.bat job <id>                                 :: 做完了沒、它�
   算成 `content_hash`；`fire` 時再算一次，不一樣就不跑（排程檔被改過的任務不會被當成原本那一筆執行）。
 - **被佔用時預設只等不搶**：`--take-over` 是建立時就講好的，到點才關掉持有者（釋放失敗退回 `waiting` 讓排程再試）；
   `release` 是現在就關、不送。兩者都是破壞性的，呼叫端（例如 ClawBot）要自己決定給不給。
+  v1.4：到點的接管**不關正在跑的**（等它停下來）、**不關程式開的**（`claude -p`）；關的時候連子程序一起收。
 - **`new` 預設在獨立的 git worktree 跑**：`%LOCALAPPDATA%\ClaudeTimerResetter\worktrees\<id>`，branch `resume/<id>`，
   你的工作目錄完全不會被動到；看過 diff 再決定要不要 merge。不是 git repo 就要明講 `--sandbox none`。
 - **`resume` 預設要求工作目錄乾淨**：Claude Code 的對話綁資料夾，只能在原本的地方跑，所以先確定沒有你還沒

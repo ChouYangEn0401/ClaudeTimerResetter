@@ -1,5 +1,30 @@
 # 更動記錄
 
+## v1.4.0
+
+起因：2026-10-15 03:51 一筆「時間到就強制接管」把一個**正在做事**的 VSCode 對話從中間砍斷；接手的
+`claude --resume --print` 沒帶權限參數（預設「(不覆寫)」），拿到 headless 的 default——白名單以外的指令、工作目錄
+以外的檔案全被拒，55 秒後 exit 0，被記成「已送出」。同一分鐘另一個對話（ISDPipelineAgent）也一樣停住。
+
+**接手時照原本的來（新預設「(沿用原本)」／CLI `inherit`）**
+- 從對話紀錄讀**最後一次在 VSCode／終端機裡**的 `permissionMode`、`requestedModel`、`effort`，明確帶
+  `--permission-mode`、`--model`、`--effort`。接管跑出來的那幾段（`sdk-cli`）不算，不然接一次就永遠退回 default。
+- `bypassPermissions` 永遠不沿用（背景沒人看著），改用 `auto` 並寫一句；讀不到就退回 `acceptEdits` 並寫明。
+- 權限選單補上 `auto`；「(不覆寫)」移到最後，說明改成實話：它是 headless 的 default，不是沿用。
+- CLI `resume` 與 `api.resume()` 的預設改成 `inherit`（`new` 沒有「原本」，照舊 `acceptEdits`）。
+
+**只接管閒著、而且是人開著的對話**
+- 到點的接管：持有者**正在跑**就不殺，等下一次重試（例如等額度用完它自己停下來）；持有者是**程式**
+  （`claude -p`：PipelineAgent 的節點、另一筆 Resumer 工作）一律不碰，等它結束再補送。
+- 人自己按的「立刻接管」「釋放佔用」看得到狀態，可以關正在跑的（CLI `release --even-busy`、
+  `api.release(..., even_busy=True)`）；程式開的照樣不碰。
+- 關的時候連子程序一起收（`taskkill /T`），收掉了哪些（`bash.exe×2、python.exe`）寫進訊息與紀錄，不留沒人管的孤兒。
+- 接管之後送出的那句前面加一段說明：接手的那個知道自己是在背景、權限是什麼、被擋住就停下來寫清楚狀態。
+
+**看結果判斷做了什麼**：視窗版也用 `--output-format json`；背景行程結束後讀結果，佇列寫
+「完成（12 輪、$0.84）」／「完成（…），但被權限擋了 3 種：Bash(git fetch)…」／「claude 回報錯誤」。CLI 的
+`job <id>` 在被擋時把同一句放進 `error`。
+
 ## v1.3.1
 
 **Python API（`claude_timer/api.py`）**：視窗上每一顆按鈕、CLI 每一個子指令都對到一個函式（sessions／show／check／

@@ -36,7 +36,7 @@ CLI 與 Python 都經過 `claude_timer/cli.py` 的 `run()`：同一組參數、�
 | 「藏起暫存與程式用的」（勾掉＝全部列） | `api.sessions(include_hidden=True)` | `sessions --all` | `SessionInfo.hidden_by_default`、`classify_origin()` |
 | 「查看內容」（雙擊） | `api.show(session_id, turns=3)` | `show <id> [--turns N]` | `resumer/transcript.py` `read()`／`Turn`；視窗 `viewer.ConversationViewer` |
 | 「檢查可否送出」 | `api.check(session_id)` | `check <id>` | `tasks.preflight()` ＋ `sessions.session_holder()`；視窗 `App._diagnose` |
-| 「釋放佔用（不送出）」 ⚠ | `api.release(session_id)` | `release <id>` | `sessions.release_session()`；視窗 `App._release_selected` |
+| 「釋放佔用（不送出）」 ⚠ | `api.release(session_id, even_busy=False)` | `release <id> [--even-busy]` | `sessions.release_session()`（程式開的不關；正在跑的要 even_busy）；視窗 `App._release_selected` |
 
 ### ② 時間到要送出什麼
 
@@ -48,7 +48,7 @@ CLI 與 Python 都經過 `claude_timer/cli.py` 的 `run()`：同一組參數、�
 | 「被佔用時：等它關掉再補送」 | 預設 | 預設 | `jobs.BUSY_WAIT` |
 | 「被佔用時：時間到就強制接管」 ⚠ | `take_over=True` | `--take-over` | `jobs.BUSY_TAKEOVER`；`cli.fire()`、`Task.fire()` 到點才 `release_session()` |
 | 「被佔用時：分支接續（未實測）」 | `fork=True` | `--fork` | `launch.build_argv(fork_session=True)`＝`claude --resume <id> --fork-session` |
-| 「權限模式」 | `permission_mode=` | `--permission-mode` | `launch.build_argv()` |
+| 「權限模式」 | `permission_mode=`（`resume` 預設 `"inherit"`） | `--permission-mode` | `inherit.resolve()` → `launch.build_argv()` |
 | 「加入排程佇列」 | `api.resume(id, prompt, at=…)` | `resume <id> --prompt … --at …` | CLI：`jobs.Job`＋`core/scheduler.install_once()`（一次性工作 `ClaudeResumer-<id>`）；視窗：`tasks.Task`（佇列在視窗裡） |
 
 ### ③ 排程佇列
