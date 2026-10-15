@@ -34,7 +34,7 @@ scripts\ctr.bat job <id>                                 :: 做完了沒、它�
 共用選項：`--permission-mode`（`resume` 預設 `inherit`＝照那個對話最後一次互動時的權限模式、模型、effort，
 `bypassPermissions` 不沿用；`new` 預設 `acceptEdits`；其他：`auto`／`plan`／`bypassPermissions`／`dontAsk`／`default`）、
 `--allowed-tools`、`--disallowed-tools`、`--max-budget-usd`（都原樣交給 claude）、`--dry-run`（排時間時只產生
-工作排程的 XML，不真的註冊）。`resume` 另有 `--no-require-clean`；`new` 另有 `--sandbox worktree|none`、`--name`。
+工作排程的 XML，不真的註冊）、`--notify`（做完經 Notifier_TB 傳一則到 Telegram；接管的一定傳，ClawBot 派的它自己會說）。`new` 另有 `--sandbox worktree|none`、`--name`。（`resume --no-require-clean` 還收，但 v1.5 起不做事。）
 
 ## 結束碼
 
@@ -66,8 +66,13 @@ scripts\ctr.bat job <id>                                 :: 做完了沒、它�
   v1.4：到點的接管**不關正在跑的**（等它停下來）、**不關程式開的**（`claude -p`）；關的時候連子程序一起收。
 - **`new` 預設在獨立的 git worktree 跑**：`%LOCALAPPDATA%\ClaudeTimerResetter\worktrees\<id>`，branch `resume/<id>`，
   你的工作目錄完全不會被動到；看過 diff 再決定要不要 merge。不是 git repo 就要明講 `--sandbox none`。
-- **`resume` 預設要求工作目錄乾淨**：Claude Code 的對話綁資料夾，只能在原本的地方跑，所以先確定沒有你還沒
-  commit 的改動、記下起點 commit；做完 `job <id>` 看得到改了什麼，不要的話 `stash <id>` 收起來。
+- **`resume` 接手前先存快照**（v1.5，擁有者 2026-10-15：「比資料都損失好一點」）：Claude Code 的對話綁資料夾，
+  只能在原本的地方跑。以前是工作目錄有還沒 commit 的改動就不接（而且接管時是先關掉人家才檢查）；現在照樣接，
+  送出前（接管的話在關掉持有者之前）把那一刻的檔案存成一個 commit，放在 `refs/resumer/snapshots/<時間>-<對話前 8 碼>`
+  ——不是分支，`git branch`、`git log` 看不到，`git push` 不會帶出去，你的工作目錄、暫存區都不動；`.gitignore` 照樣有效，
+  `.env` 這種不會被存進去。留最新 20 份；沒變的重試沿用同一份。job 的 `snapshot` 欄位就是那一份，
+  `git diff <那一份>` 看接手後改了什麼、`git restore --source=<那一份> -- <檔案>` 拿回來。
+  起點 commit 照樣記；做完 `job <id>` 看得到改了什麼，不要的話 `stash <id>` 收起來。
 - **工具限制、預算**：`--allowed-tools`／`--disallowed-tools`／`--max-budget-usd` 原樣交給 claude。
 
 ## 鐵律（跟視窗版一樣）

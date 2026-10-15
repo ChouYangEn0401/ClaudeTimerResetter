@@ -57,7 +57,7 @@ class Job:
     allowed_tools: str = ""
     disallowed_tools: str = ""
     max_budget_usd: float = 0.0
-    require_clean: bool = True        # resume：工作目錄要乾淨（做完的改動才收得回來）
+    require_clean: bool = True        # v1.5 起不再擋（髒的照樣接，先存快照）；留著是為了舊排程的 content_hash 對得上
     busy_policy: str = BUSY_WAIT      # resume：到點時對話被佔用——wait 等它關掉／takeover 關掉它再送／fork 分支接續
     sandbox: str = "worktree"         # new：worktree＝在獨立的 git worktree＋branch 跑；none＝直接在 cwd
     name: str = ""
@@ -75,6 +75,9 @@ class Job:
     result: str = ""
     cost_usd: float = 0.0
     error: str = ""
+    snapshot: str = ""                # 接手前存的快照（refs/resumer/snapshots/…；乾淨的就是空的）
+    took_over: bool = False           # 送出時關掉了持有者
+    notify: bool = False              # 做完傳 Telegram（--notify；接管的一定傳）
 
     @property
     def log_path(self) -> Path:

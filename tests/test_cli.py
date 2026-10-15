@@ -18,11 +18,13 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+os.environ["CLAUDE_RESUMER_NOTIFY"] = "0"   # 測試絕對不能真的傳到擁有者的 Telegram；要測的那一個自己開
 
 FAKE_CLAUDE = r'''
 import json, os, sys
@@ -143,13 +145,83 @@ class CliTest(unittest.TestCase):
         self.assertEqual(git(self.repo, "status", "--porcelain"), "")
         self.assertIn(f"resume-{job['id']}", git(self.repo, "stash", "list"))
 
-    def test_resume_requires_clean_tree(self):
+    def test_a_dirty_tree_is_snapshotted_then_resumed(self):
+        """v1.5（擁有者 2026-10-15）：髒的不再擋，先存快照照樣接。不動工作目錄、不動暫存區、不多分支。"""
         (self.repo / "README.md").write_text("dirty\n", encoding="utf-8")
+        (self.repo / "new.txt").write_text("new file, not added yet\n", encoding="utf-8")
+        (self.repo / ".gitignore").write_text(".env\n", encoding="utf-8")
+        (self.repo / ".env").write_text("SECRET=must-not-be-snapshotted\n", encoding="utf-8")
+        branches = git(self.repo, "branch", "--list")
         code, job = self.run_cli("resume", self.sid, "--prompt", "continue")
-        self.assertEqual((code, job["status"]), (1, "failed"))
-        self.assertIn("還沒 commit", job["error"])
-        code, job = self.run_cli("resume", self.sid, "--prompt", "continue", "--no-require-clean")
+        self.assertEqual((code, job["status"]), (0, "done"), job)
+        ref = job["snapshot"]
+        self.assertTrue(ref.startswith("refs/resumer/snapshots/") and ref.endswith(self.sid[:8]), ref)
+        self.assertEqual(git(self.repo, "show", f"{ref}:README.md"), "dirty")      # 接手前那一刻的內容
+        self.assertEqual(git(self.repo, "show", f"{ref}:new.txt"), "new file, not added yet")
+        self.assertNotIn(".env", git(self.repo, "ls-tree", "-r", "--name-only", ref))  # .gitignore 照樣有效
+        self.assertEqual(git(self.repo, "rev-parse", f"{ref}^"), git(self.repo, "rev-parse", "HEAD"))
+        self.assertEqual(git(self.repo, "branch", "--list"), branches)            # 沒有多一個分支
+        self.assertIn("?? new.txt", git(self.repo, "status", "--porcelain"))      # 暫存區沒被動到
+        self.assertIn("changed by claude", (self.repo / "README.md").read_text(encoding="utf-8"))
+        code, job = self.run_cli("resume", self.sid, "--prompt", "again", "--no-require-clean")   # 舊旗標還收
         self.assertEqual(job["status"], "done")
+
+    def test_a_clean_tree_needs_no_snapshot_and_old_ones_are_pruned(self):
+        code, job = self.run_cli("resume", self.sid, "--prompt", "continue")
+        self.assertEqual(job["snapshot"], "")
+        from claude_timer.resumer import snapshot
+        for i in range(snapshot.KEEP + 3):
+            (self.repo / "README.md").write_text(f"dirty {i}\n", encoding="utf-8")
+            git(self.repo, "update-ref", f"{snapshot.PREFIX}20260101-0000{i:02d}-old", "HEAD")
+        snapshot.prune(str(self.repo))
+        self.assertEqual(len(snapshot.listing(str(self.repo))), snapshot.KEEP)
+
+    def test_takeover_snapshots_before_closing_the_holder_and_notifies(self):
+        """接管：關掉持有者之前先存快照；做完經 Notifier_TB 傳一則（假的 Notifier：本機 socket）。"""
+        import socket
+        import threading
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(5)
+        got = []
+
+        def serve():
+            server.settimeout(60)
+            try:
+                conn, _ = server.accept()
+                with conn:
+                    got.append(json.loads(conn.recv(65536).decode("utf-8")))
+            except OSError:
+                pass
+        threading.Thread(target=serve, daemon=True).start()
+        nt = self.tmp / "Notifier_TB"
+        nt.mkdir()
+        (nt / "config.json").write_text(json.dumps({"socket_host": "127.0.0.1", "socket_port": server.getsockname()[1],
+                                                    "socket_secret": "s3"}), encoding="utf-8")
+        os.environ.update({"NOTIFIER_TB_HOME": str(nt), "CLAUDE_RESUMER_NOTIFY": "1"})
+        (self.repo / "README.md").write_text("half done\n", encoding="utf-8")
+        seen_at_release = []
+
+        def release_and_look(session_id, timeout=10.0, *, allow_busy=False):
+            seen_at_release.append(git(self.repo, "for-each-ref", "refs/resumer/"))
+            self.holder.pop(session_id, None)
+            return True, "已釋放（關閉 pid 1）"
+        self.sessions.release_session = release_and_look
+        self.holder[self.sid] = {"pid": 1, "entrypoint": "claude-vscode", "cwd": str(self.repo)}
+        code, job = self.run_cli("resume", self.sid, "--prompt", "continue", "--take-over")
+        self.assertEqual(job["status"], "done", job)
+        self.assertTrue(job["took_over"] and job["snapshot"])
+        self.assertIn(job["snapshot"], seen_at_release[0])                     # 關掉之前就存好了
+        deadline = time.time() + 60
+        while not got and time.time() < deadline:
+            time.sleep(0.2)
+        server.close()
+        self.assertTrue(got, "做完要經 Notifier_TB 傳一則")
+        self.assertEqual(got[0]["sig"], "s3")
+        text = got[0]["payload"]
+        self.assertIn("接續做完了（WebApp）", text)
+        self.assertIn("接管", text)
+        self.assertIn(job["snapshot"], text)
 
     # ── 排時間：一次性工作、到點 fire、重複 fire 安全、內容釘死 ──
 

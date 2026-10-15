@@ -25,7 +25,9 @@ from datetime import datetime
 from pathlib import Path
 
 from ..paths import ensure_install_dir, resume_task_log
-from . import journal
+import threading
+
+from . import journal, notify, snapshot
 from .jobs import BUSY_FORK, BUSY_TAKEOVER, BUSY_WAIT
 from .inherit import INHERIT, resolve as resolve_permission, takeover_preamble
 from .launch import CONFIRM_SECONDS, build_argv, claude_prefix, outcome_line, read_outcome, start_detached
@@ -141,6 +143,8 @@ class Task:
         self.log_path = resume_task_log(self.id)
         self.took_over = False              # 人按「立刻接管」：送出時加接管說明
         self.outcome: str = ""              # 背景行程結束後，照它的結果 JSON 寫的那一句
+        self.snapshot_ref: str = ""         # 接手前存的快照（v1.5；乾淨的就是空的）
+        self.was_taken_over = False         # 這一次送出有關掉持有者（做完的通知會講）
 
     # -- 給畫面用 --
 
@@ -180,6 +184,13 @@ class Task:
         holder = session_holder(self.session.session_id)
         fork = False
         took_over = False
+        if holder and self.busy_policy not in (BUSY_TAKEOVER, BUSY_FORK):
+            self.status = STATUS_LOCKED
+            self.error = f"{describe_holder(holder)}，請關閉後它會自動補送"
+            return False
+        # 要送了：先存快照（v1.5，擁有者 2026-10-15：比資料損失好）。接管的話在關掉持有者之前存
+        # （每次送都存：接管要等持有者閒下來時一輪一輪重試，沒變的話 snapshot.take 會沿用同一份）
+        self.take_snapshot("接管前" if holder and self.busy_policy == BUSY_TAKEOVER else "接續前")
         if holder:
             if self.busy_policy == BUSY_TAKEOVER:
                 # 到點的接管：正在跑的、程式開的都不殺，等下一輪 tick 再試（sessions.release_session）
@@ -198,6 +209,7 @@ class Task:
                 return False
 
         took_over = took_over or self.took_over
+        self.was_taken_over = took_over
         settings = resolve_permission(self.permission_mode, self.session.jsonl)
         prompt = self.prompt
         if took_over:
@@ -261,7 +273,18 @@ class Task:
                 self.status = STATUS_FAILED
                 self.error = self.outcome
         journal.write(f"OUTCOME task={self.id} {self.outcome}")
+        # 背景那一段沒有人看著：做完講一聲（另開執行緒，Notifier 沒開著要等它起來，畫面不能卡住）
+        text = notify.finished_text(self.session.project, self.outcome, took_over=self.was_taken_over,
+                                    snapshot_ref=self.snapshot_ref, failed=self.status == STATUS_FAILED)
+        threading.Thread(target=notify.send, args=(text,), daemon=True, name="resumer-notify").start()
         return True
+
+    def take_snapshot(self, reason: str) -> str:
+        """存一份專案資料夾現在的樣子（snapshot.py）；回傳那一句話（給畫面、journal）。"""
+        snap = snapshot.take(self.session.cwd, self.session.session_id, reason=reason)
+        self.snapshot_ref = snap.ref
+        journal.write(f"SNAPSHOT task={self.id} {snap.note}")
+        return snap.note
 
     def _log_tail(self, limit: int = 300) -> str:
         try:

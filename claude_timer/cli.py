@@ -43,7 +43,7 @@ from .core import scheduler
 from .paths import ensure_install_dir, install_dir, projects_dir
 from .resumer import jobs as store
 from .resumer import sessions as sess
-from .resumer import transcript
+from .resumer import journal, notify, snapshot, transcript
 from .resumer.inherit import FALLBACK_MODE, INHERIT_TOKENS, resolve as resolve_permission, takeover_preamble
 from .resumer.launch import CONFIRM_SECONDS, build_argv, outcome_line, read_outcome, start_detached
 from .resumer.tasks import PERMISSION_MODES, preflight
@@ -122,6 +122,10 @@ def _session_dict(s: sess.SessionInfo, holders: dict) -> dict:
 
 # ── jobs ──────────────────────────────────────────────────────────────
 
+WATCH_HOURS = 24      # watch 最多等多久
+WATCH_EVERY = 15.0    # watch 多久看一次那筆做完沒（讀一個 log 檔，不花錢）
+
+
 def refresh(job: store.Job) -> store.Job:
     """sent 的 job：log 裡有結果就是 done；行程不在了又沒結果就是 failed。"""
     if job.status != store.SENT:
@@ -179,6 +183,16 @@ def fire(job: store.Job) -> int:
         holder = sess.session_holder(job.session_id)
         fork = job.busy_policy == store.BUSY_FORK
         took_over = False
+        if holder and not fork and job.busy_policy != store.BUSY_TAKEOVER:
+            job.status, job.error = store.WAITING, f"{sess.describe_holder(holder)}；關掉之後會自動補送"
+            store.update(job)
+            return EXIT_WAIT
+        # 要送了：先把專案資料夾現在的樣子存一份（v1.5；以前是髒的就不接——接管時還是先關掉人家才檢查）。
+        # 接管的話在關掉持有者之前存，存的就是它被關掉那一刻之前的樣子
+        snap = snapshot.take(session.cwd, job.session_id, reason="接管前" if holder else "接續前")
+        job.snapshot = snap.ref
+        if snap.taken:
+            store.update(job)
         if holder and job.busy_policy == store.BUSY_TAKEOVER:
             # 排程時就講好「到點若被佔用就接管」：關掉持有它的行程，鎖釋放了才送。正在跑的、程式開的不殺，等下一次重試
             ok, message = sess.release_session(job.session_id)
@@ -186,17 +200,10 @@ def fire(job: store.Job) -> int:
                 job.status, job.error = store.WAITING, f"還沒接管：{message}"
                 store.update(job)
                 return EXIT_WAIT
-            holder = None
             took_over = True
-        if holder and not fork:
-            job.status, job.error = store.WAITING, f"{sess.describe_holder(holder)}；關掉之後會自動補送"
-            store.update(job)
-            return EXIT_WAIT
+        job.took_over = took_over
         run_cwd = session.cwd
         if _is_repo(run_cwd):
-            if job.require_clean and _git(run_cwd, "status", "--porcelain")[1]:
-                return _fail(job, "工作目錄有還沒 commit 的改動：先 commit 或 stash，接續做的改動才收得回來"
-                                  "（真的不在意就用 --no-require-clean 重排）。")
             start_commit = _git(run_cwd, "rev-parse", "HEAD")[1]
         settings = resolve_permission(job.permission_mode, session.jsonl)
         prompt = job.prompt
@@ -238,6 +245,8 @@ def fire(job: store.Job) -> int:
     store.update(job)
     if not _no_schtasks():
         scheduler.delete_once(job.id)
+    if job.notify or job.took_over:
+        _start_watcher(job)                    # 做完傳一則到 Telegram（notify.py）；接管一定傳
     deadline = time.monotonic() + _confirm_seconds()
     while time.monotonic() < deadline and proc.poll() is None:
         time.sleep(0.2)
@@ -245,6 +254,35 @@ def fire(job: store.Job) -> int:
         refresh(job)
         return EXIT_FAILED if job.status == store.FAILED else EXIT_OK
     return EXIT_OK
+
+
+def _start_watcher(job: store.Job) -> None:
+    """另開一個不掛在任何東西底下的小行程，等這筆做完就經 Notifier_TB 講一聲（cmd_watch）。"""
+    if getattr(sys, "frozen", False):
+        return
+    try:
+        start_detached([sys.executable, "-m", "claude_timer.cli", "watch", job.id], str(ROOT),
+                       install_dir() / f"watch-{job.id}.log")
+    except OSError as e:
+        journal.write(f"WATCH job={job.id} 開不起來：{e}")
+
+
+def finished_notice(job: store.Job) -> str:
+    outcome = job.error or (f"它最後說：{job.result[:300]}" if job.result else "")
+    return notify.finished_text(Path(job.cwd).name, outcome, took_over=job.took_over,
+                                snapshot_ref=job.snapshot, failed=job.status == store.FAILED)
+
+
+def cmd_watch(a):
+    """（給 fire 開的小行程用）等這筆 job 做完，傳一則到 Telegram。最多等 WATCH_HOURS 小時。"""
+    deadline = time.monotonic() + WATCH_HOURS * 3600
+    while time.monotonic() < deadline:
+        job = refresh(store.get(a.job))
+        if job.status in store.FINAL:
+            sent = notify.send(finished_notice(job))
+            return EXIT_OK, {"job": job.id, "status": job.status, "sent": sent}, "已通知" if sent else "沒通知到"
+        time.sleep(WATCH_EVERY)
+    return EXIT_FAILED, {"job": a.job, "sent": False}, "等太久了，不等了"
 
 
 def _fail(job: store.Job, message: str) -> int:
@@ -362,6 +400,7 @@ def cmd_resume(a):
         raise CliError(EXIT_BAD, "--take-over 跟 --fork 只能選一個（一個是關掉持有者，一個是不搶、開新 id）")
     job = _common_job(a, "resume", s.cwd, s.session_id)
     job.require_clean = not a.no_require_clean
+    job.notify = bool(a.notify)
     job.busy_policy = store.BUSY_TAKEOVER if a.take_over else (store.BUSY_FORK if a.fork else store.BUSY_WAIT)
     at = parse_at(a.at)
     job.at = at.isoformat(timespec="seconds") if at else ""
@@ -379,6 +418,7 @@ def cmd_new(a):
         raise CliError(EXIT_BAD, f"資料夾不存在：{cwd}")
     job = _common_job(a, "new", cwd, str(uuid.uuid4()))
     job.sandbox, job.name = a.sandbox, a.name or ""
+    job.notify = bool(a.notify)
     at = parse_at(a.at)
     job.at = at.isoformat(timespec="seconds") if at else ""
     code, xml = schedule_or_fire(job, at, a.dry_run)
@@ -452,7 +492,10 @@ def cmd_stash(a):
     code, text = _git(job.run_cwd, "stash", "push", "-u", "-m", f"resume-{job.id}")
     if code != 0:
         raise CliError(EXIT_FAILED, f"git stash 失敗：{text}")
-    return EXIT_OK, {"stashed": True, "message": text}, f"收起來了（git stash list 找得到 resume-{job.id}）：{text}"
+    before = (f"\n注意：接手前本來就有沒 commit 的改動，也一起收進去了；接手前的樣子在 {job.snapshot}"
+              f"（git restore --source={job.snapshot} -- . 拿回來）") if job.snapshot else ""
+    return (EXIT_OK, {"stashed": True, "message": text, "snapshot": job.snapshot},
+            f"收起來了（git stash list 找得到 resume-{job.id}）：{text}{before}")
 
 
 # ── argparse ──────────────────────────────────────────────────────────
@@ -487,11 +530,14 @@ def _parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParser:
         sp.add_argument("--disallowed-tools", default="")
         sp.add_argument("--max-budget-usd", type=float, default=0.0)
         sp.add_argument("--dry-run", action="store_true", help="排時間時只產生工作排程的 XML，不真的註冊")
+        sp.add_argument("--notify", action="store_true",
+                        help="做完經 Notifier_TB 傳一則到 Telegram（接管的一定傳；ClawBot 派的它自己會說，不用加）")
 
     sp = add("resume", cmd_resume, "接續舊對話")
     sp.add_argument("session")
     task_flags(sp, permission_default="inherit")
-    sp.add_argument("--no-require-clean", action="store_true", help="工作目錄有沒 commit 的改動也照送")
+    # v1.5 起髒的工作目錄照樣接（接之前先存快照，snapshot.py）；舊的呼叫還會帶這個旗標，收下但不做事
+    sp.add_argument("--no-require-clean", action="store_true", help=argparse.SUPPRESS)
     sp.add_argument("--take-over", action="store_true",
                     help="到點時對話若正被你的 VSCode／終端機開著而且閒著，關掉它（連子程序）再送（破壞性；預設是等它關掉）。"
                          "正在跑的不從中間砍斷、程式開的（claude -p）不碰，都等下一次重試")
@@ -513,6 +559,7 @@ def _parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParser:
     sp.add_argument("--all", action="store_true")
     add("fire", cmd_fire, "（工作排程器用）送出一筆").add_argument("id")
     add("stash", cmd_stash, "把那筆接續做的改動收起來").add_argument("id")
+    add("watch", cmd_watch, "（fire 自己開的）等一筆做完，經 Notifier_TB 傳 Telegram").add_argument("job")   # fire 開的小行程：做完傳 Telegram
     return p
 
 
