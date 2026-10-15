@@ -86,7 +86,7 @@ class CliTest(unittest.TestCase):
         self.released = []
         self._orig_release = sessions.release_session
 
-        def fake_release(session_id, timeout=10.0):
+        def fake_release(session_id, timeout=10.0, *, allow_busy=False):
             self.released.append(session_id)
             if self.holder.pop(session_id, None) is None:
                 return True, "目前沒有被佔用"
@@ -207,6 +207,31 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.released, [])
         code, err = self.run_cli("resume", self.sid, "--prompt", "x", "--fork", "--take-over")
         self.assertEqual(code, 4)
+
+    def test_resume_carries_the_conversations_own_mode_model_and_effort(self):
+        """v1.4：不指定就是 inherit——照 VSCode 裡最後用的權限模式、模型、effort；接管那段（sdk-cli）的 default 不算。"""
+        jsonl = next((self.tmp / "home" / ".claude" / "projects").glob(f"*/{self.sid}.jsonl"))
+        extra = [
+            {"type": "user", "entrypoint": "claude-vscode", "permissionMode": "auto", "cwd": str(self.repo),
+             "message": {"role": "user", "content": "繼續"}},
+            {"type": "assistant", "entrypoint": "claude-vscode", "requestedModel": "claude-opus-5-5", "effort": "medium",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "好"}]}},
+            {"type": "user", "entrypoint": "sdk-cli", "permissionMode": "default", "cwd": str(self.repo),
+             "message": {"role": "user", "content": "continue"}},
+        ]
+        with open(jsonl, "a", encoding="utf-8") as fh:
+            fh.write("\n" + "\n".join(json.dumps(x, ensure_ascii=False) for x in extra))
+        code, job = self.run_cli("resume", self.sid, "--prompt", "continue")
+        self.assertEqual(code, 0, job)
+        args = self.claude_args()[-1]
+        self.assertEqual(args[args.index("--permission-mode") + 1], "auto")
+        self.assertEqual(args[args.index("--model") + 1], "claude-opus-5-5")
+        self.assertEqual(args[args.index("--effort") + 1], "medium")
+        code, job = self.run_cli("resume", self.sid, "--prompt", "continue", "--permission-mode", "acceptEdits",
+                                 "--no-require-clean")          # 上一次的假 claude 改了 README
+        self.assertEqual(code, 0, job)
+        args = self.claude_args()[-1]
+        self.assertEqual(args[args.index("--permission-mode") + 1], "acceptEdits")   # 明講的照明講的
 
     def test_release_verb(self):
         code, data = self.run_cli("release", self.sid)

@@ -386,15 +386,34 @@ def describe_holder(holder: dict) -> str:
     return f"目前正開在 {where}（pid {holder['pid']}）{name}" + (f"，{state}" if state else "")
 
 
-def release_session(session_id: str, timeout: float = 10.0) -> tuple[bool, str]:
-    """把佔用這個對話的行程關掉、等鎖真的釋放。**不送任何東西**。
+def _kill_tree(pid: int) -> list[tuple[int, str]]:
+    """關掉 pid 與它所有的子孫行程（taskkill /T /F），回傳關掉之前列到的子孫 [(pid, 名稱)]。丟 OSError。"""
+    from claude_timer.core.procs import descendants
+    kids = descendants(int(pid))
+    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True,
+                   creationflags=subprocess.CREATE_NO_WINDOW)
+    return kids
+
+
+# 只接管「人開著的」對話。程式開的（claude -p：PipelineAgent 的節點、另一筆 Resumer 工作）有自己的主人在追蹤它，
+# 從這裡殺掉它，那邊就會看到一段莫名其妙中斷的 session（v1.4）。
+INTERACTIVE_ENTRYPOINTS = ("claude-vscode", "cli")
+
+
+def release_session(session_id: str, timeout: float = 10.0, *, allow_busy: bool = False) -> tuple[bool, str]:
+    """把佔用這個對話的行程（連同它的子程序）關掉、等鎖真的釋放。**不送任何東西**。
 
     Claude Code 的鎖是「誰的行程還活著誰持有」，沒有禮貌接管的 API——要拿走只能讓現在的持有者
-    結束。所以這裡直接 taskkill 那個 pid（破壞性：那個對話在 VSCode 裡沒存／正在跑的東西會一起
-    沒掉），然後輪詢 session_holder() 直到回 None 才算釋放成功。kill 之後 VSCode 擴充有可能馬上
-    重連把 session 搶回去，所以會等到逾時；逾時仍未釋放就回失敗，讓呼叫端不要硬送一次必然失敗的接續。
+    結束（破壞性：那個對話在 VSCode 裡沒存／正在跑的東西會一起沒掉）。所以先擋兩種不該殺的（v1.4）：
 
-    「立刻接管並送出」＝ release_session() 成功之後再 fire；「只釋放」就只做這一步。
+    - **程式開的**（entrypoint 不是 VSCode／終端機）：一律不碰，回 False——呼叫端照「被佔用」處理，它結束後補送。
+    - **正在跑的**（status busy）：排程到點的接管不殺，回 False 等下一次重試（等它停下來，例如額度用完）；
+      只有人自己按「立刻接管」「釋放佔用」時（`allow_busy=True`）才殺。2026-10-15 03:51 就是到點把一個正在
+      做事的對話從中間砍斷。
+
+    殺的時候用 taskkill /T：它開的 bash、背景測試、自己起的伺服器一起收，不留沒人管的孤兒；收掉的名字寫進回傳訊息。
+    然後輪詢 session_holder() 直到回 None 才算釋放成功。kill 之後 VSCode 擴充有可能馬上重連把 session 搶回去，
+    所以會等到逾時；逾時仍未釋放就回失敗，讓呼叫端不要硬送一次必然失敗的接續。
     """
     holder = session_holder(session_id)
     if holder is None:
@@ -402,15 +421,25 @@ def release_session(session_id: str, timeout: float = 10.0) -> tuple[bool, str]:
     pid = holder.get("pid")
     if not pid:
         return False, "持有者資訊沒有 pid，無法釋放"
+    entry = str(holder.get("entrypoint") or "")
+    if entry not in INTERACTIVE_ENTRYPOINTS:
+        return False, (f"這個對話正被程式開著（{entry or '?'}，pid {pid}：claude -p，例如 PipelineAgent 的節點或另一筆 "
+                       "Resumer 工作），不接管；它結束後會自動補送")
+    if holder.get("status") == "busy" and not allow_busy:
+        return False, f"{describe_holder(holder)}：正在做事，不從中間砍斷；等它停下來（例如額度用完）再接管，會再試"
     try:
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                       capture_output=True, text=True,
-                       creationflags=subprocess.CREATE_NO_WINDOW)
+        kids = _kill_tree(int(pid))
     except OSError as e:
         return False, f"taskkill 失敗：{e}"
+    with_kids = ""
+    if kids:
+        names: dict[str, int] = {}
+        for _, name in kids:
+            names[name] = names.get(name, 0) + 1
+        with_kids = "，連帶關掉 " + "、".join(f"{n}×{c}" if c > 1 else n for n, c in sorted(names.items()))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if session_holder(session_id) is None:
-            return True, f"已釋放（關閉 pid {pid}）"
+            return True, f"已釋放（關閉 pid {pid}{with_kids}）"
         time.sleep(0.3)
-    return False, f"關了 pid {pid}，但鎖還沒釋放（可能 VSCode 又重連），請稍後再試"
+    return False, f"關了 pid {pid}{with_kids}，但鎖還沒釋放（可能 VSCode 又重連），請稍後再試"

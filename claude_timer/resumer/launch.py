@@ -34,7 +34,9 @@ def claude_prefix() -> List[str]:
 def build_argv(prompt: str, *, resume: Optional[str] = None, session_id: Optional[str] = None,
                permission_mode: Optional[str] = None, allowed_tools: Optional[str] = None,
                disallowed_tools: Optional[str] = None, max_budget_usd: Optional[float] = None,
-               output_json: bool = False, fork_session: bool = False) -> List[str]:
+               output_json: bool = False, fork_session: bool = False, model: Optional[str] = None,
+               effort: Optional[str] = None) -> List[str]:
+    """permission_mode 是**已經決定好**的值（inherit.resolve 之後）：「(…)」開頭或空字串＝不加。"""
     argv = claude_prefix()
     if resume:
         argv += ["--resume", resume]
@@ -45,8 +47,12 @@ def build_argv(prompt: str, *, resume: Optional[str] = None, session_id: Optiona
     elif session_id:
         argv += ["--session-id", session_id]
     argv += ["--print", prompt]
-    if permission_mode and permission_mode != NO_OVERRIDE:
+    if permission_mode and not permission_mode.startswith("("):
         argv += ["--permission-mode", permission_mode]
+    if model:
+        argv += ["--model", model]       # 沿用原本：接手的那一段跟你在 VSCode 用的是同一個模型
+    if effort:
+        argv += ["--effort", effort]
     if allowed_tools:
         argv += ["--allowedTools", allowed_tools]
     if disallowed_tools:
@@ -57,6 +63,52 @@ def build_argv(prompt: str, *, resume: Optional[str] = None, session_id: Optiona
         # log 最後就是一個 JSON（回覆、花費、session id）：CLI 的 job <id> 靠它判斷做完了沒
         argv += ["--output-format", "json"]
     return argv
+
+
+def read_outcome(log_path: Path) -> Optional[dict]:
+    """`--output-format json` 的結果（log 最後那個 JSON 物件），整理成 {is_error, subtype, turns, cost, denials}；
+    還沒有結果（還在跑、或死掉沒寫）就 None。
+
+    為什麼要看它：exit 0 不等於做了事。2026-10-15 那一晚接手的對話被權限擋光、55 秒就結束、exit 0，被記成成功。
+    `permission_denials` 是 Claude Code 自己列的「這一段哪些工具呼叫被擋了」。"""
+    import json
+    try:
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(text.strip().splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("type") == "result":
+            denials = []
+            for d in data.get("permission_denials") or []:
+                if isinstance(d, dict):
+                    args = d.get("tool_input") if isinstance(d.get("tool_input"), dict) else {}
+                    what = next((str(args[k]) for k in ("command", "file_path", "path") if args.get(k)), "")
+                    label = f"{d.get('tool_name', '?')}({what[:120]})" if what else str(d.get("tool_name", "?"))
+                    if label not in denials:
+                        denials.append(label)
+            return {"is_error": bool(data.get("is_error")), "subtype": data.get("subtype"),
+                    "turns": data.get("num_turns"), "cost": data.get("total_cost_usd"), "denials": denials,
+                    "result": str(data.get("result") or "")}
+    return None
+
+
+def outcome_line(outcome: dict) -> str:
+    """「完成：12 輪、$0.84」／「完成，但被權限擋了 3 次：Bash(git fetch)…」／「claude 回報錯誤：…」"""
+    cost = f"、${outcome['cost']:.2f}" if isinstance(outcome.get("cost"), (int, float)) else ""
+    head = f"{outcome.get('turns') or '?'} 輪{cost}"
+    if outcome.get("is_error"):
+        return f"claude 回報錯誤（{outcome.get('subtype')}，{head}）：{outcome.get('result', '')[:160]}"
+    if outcome.get("denials"):
+        shown = "、".join(outcome["denials"][:3]) + ("…" if len(outcome["denials"]) > 3 else "")
+        return f"完成（{head}），但被權限擋了 {len(outcome['denials'])} 種：{shown}"
+    return f"完成（{head}）"
 
 
 def start_detached(argv: List[str], cwd: str, log_path: Path) -> subprocess.Popen:

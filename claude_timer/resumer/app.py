@@ -406,7 +406,7 @@ class App(tk.Tk):
             parent=self,
         ):
             return
-        ok, message = release_session(session.session_id)
+        ok, message = release_session(session.session_id, allow_busy=True)   # 人看過狀態、自己按的
         self._say(f"[釋放] {session.display}：{message}")
         self._refresh_session_list()
 
@@ -570,9 +570,10 @@ class App(tk.Tk):
             parent=self,
         ):
             return
-        ok, message = release_session(task.session.session_id)
+        ok, message = release_session(task.session.session_id, allow_busy=True)   # 人看過狀態、自己按的
         self._say(f"[接管] task={task.id}：{message}")
         if ok:
+            task.took_over = True
             self._fire(task, note="接管後送出")
         self._refresh_queue()
 
@@ -612,6 +613,10 @@ class App(tk.Tk):
         changed = False
 
         for t in self.tasks:
+            if t.check_outcome():
+                changed = True
+                self._say(f"[結果] task={t.id}：{t.outcome}")
+                continue
             if t.status == STATUS_SENDING:
                 changed |= t.poll()
                 if t.status == STATUS_FAILED:

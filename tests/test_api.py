@@ -41,7 +41,10 @@ class ApiTest(unittest.TestCase):
         self.holder[self.sid] = {"pid": 1, "entrypoint": "claude-vscode", "cwd": str(self.repo)}
         r = api.fire(job_id)
         self.assertEqual((r.code, r.data["status"]), (0, "done"))
-        self.assertEqual(api.job(job_id).data["result"], "ok: continue")
+        # 接管之後送出的那句前面有接管說明（v1.4）：接手的那個知道自己的處境，被擋住時才知道要停下來寫狀態
+        result = api.job(job_id).data["result"]
+        self.assertTrue(result.startswith("ok: （ClaudeTimerResetter 在") and result.endswith("\n\ncontinue"), result)
+        self.assertIn("沒有人能回答問題或按核准", result)
         self.assertTrue(api.stash(job_id).ok)
 
         r = api.new(str(self.repo), "加一個關於頁")
