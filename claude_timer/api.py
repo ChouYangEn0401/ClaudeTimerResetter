@@ -110,16 +110,16 @@ def job(job_id: str) -> Result:
 
 # ── 動手 ──────────────────────────────────────────────────────────────
 
-def release(session_id: str) -> Result:
+def release(session_id: str, *, even_busy: bool = False) -> Result:
     """① 「釋放佔用（不送出）」：關掉佔用這個對話的 Claude Code 行程，什麼都不送。
 
     **破壞性**：那個對話在 VSCode 裡沒存、正在跑的東西會一起沒掉。只在人說「這個用完了、清掉它」時叫。
     """
-    return _call("release", session_id)
+    return _call("release", session_id, *(["--even-busy"] if even_busy else []))
 
 
 def resume(session_id: str, prompt: str = "continue", at: Optional[str] = None, *, take_over: bool = False,
-           fork: bool = False, permission_mode: str = "acceptEdits", allowed_tools: str = "",
+           fork: bool = False, permission_mode: str = "inherit", allowed_tools: str = "",
            disallowed_tools: str = "", max_budget_usd: float = 0.0, require_clean: bool = True,
            dry_run: bool = False) -> Result:
     """② ③ 接續一個對話：at 不給＝現在送（「立即送出」），給了＝排時間（「加入排程佇列」）。

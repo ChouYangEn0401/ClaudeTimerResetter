@@ -44,12 +44,13 @@ from .paths import ensure_install_dir, install_dir, projects_dir
 from .resumer import jobs as store
 from .resumer import sessions as sess
 from .resumer import transcript
-from .resumer.launch import CONFIRM_SECONDS, build_argv, start_detached
+from .resumer.inherit import FALLBACK_MODE, INHERIT_TOKENS, resolve as resolve_permission, takeover_preamble
+from .resumer.launch import CONFIRM_SECONDS, build_argv, outcome_line, read_outcome, start_detached
 from .resumer.tasks import PERMISSION_MODES, preflight
 
 EXIT_OK, EXIT_FAILED, EXIT_NOT_FOUND, EXIT_WAIT, EXIT_BAD = 0, 1, 2, 3, 4
 ROOT = Path(__file__).resolve().parent.parent
-MODES = [m for m in PERMISSION_MODES if not m.startswith("(")] + ["auto", "default"]
+MODES = sorted({m for m in PERMISSION_MODES if not m.startswith("(")} | {"auto", "default", "inherit"})
 
 
 class CliError(Exception):
@@ -134,6 +135,10 @@ def refresh(job: store.Job) -> store.Job:
         job.finished_at = datetime.now().isoformat(timespec="seconds")
         if data.get("is_error"):
             job.error = f"claude 回報錯誤：{data.get('subtype')}"
+        else:
+            outcome = read_outcome(Path(job.log_path))
+            if outcome and outcome.get("denials"):
+                job.error = outcome_line(outcome)         # 完成，但被權限擋了：做了多少要看這一句（v1.4）
         store.update(job)
     elif not store.alive(job):
         job.status = store.FAILED
@@ -173,14 +178,16 @@ def fire(job: store.Job) -> int:
             return _fail(job, "；".join(problems))
         holder = sess.session_holder(job.session_id)
         fork = job.busy_policy == store.BUSY_FORK
+        took_over = False
         if holder and job.busy_policy == store.BUSY_TAKEOVER:
-            # 排程時就講好「到點若被佔用就接管」：關掉持有它的行程，鎖釋放了才送
+            # 排程時就講好「到點若被佔用就接管」：關掉持有它的行程，鎖釋放了才送。正在跑的、程式開的不殺，等下一次重試
             ok, message = sess.release_session(job.session_id)
             if not ok:
-                job.status, job.error = store.WAITING, f"到時接管失敗：{message}；排程會再試"
+                job.status, job.error = store.WAITING, f"還沒接管：{message}"
                 store.update(job)
                 return EXIT_WAIT
             holder = None
+            took_over = True
         if holder and not fork:
             job.status, job.error = store.WAITING, f"{sess.describe_holder(holder)}；關掉之後會自動補送"
             store.update(job)
@@ -191,7 +198,13 @@ def fire(job: store.Job) -> int:
                 return _fail(job, "工作目錄有還沒 commit 的改動：先 commit 或 stash，接續做的改動才收得回來"
                                   "（真的不在意就用 --no-require-clean 重排）。")
             start_commit = _git(run_cwd, "rev-parse", "HEAD")[1]
-        argv = build_argv(job.prompt, resume=job.session_id, permission_mode=job.permission_mode,
+        settings = resolve_permission(job.permission_mode, session.jsonl)
+        prompt = job.prompt
+        if took_over:
+            prompt = takeover_preamble(at=datetime.now().strftime("%m-%d %H:%M"),
+                                       permission_mode=settings.permission_mode) + prompt
+        argv = build_argv(prompt, resume=job.session_id, permission_mode=settings.permission_mode,
+                          model=settings.model or None, effort=settings.effort or None,
                           allowed_tools=job.allowed_tools, disallowed_tools=job.disallowed_tools,
                           max_budget_usd=job.max_budget_usd or None, output_json=True, fork_session=fork)
     else:
@@ -208,7 +221,9 @@ def fire(job: store.Job) -> int:
                 return _fail(job, f"開 worktree 失敗：{text}")
         elif _is_repo(job.cwd):
             start_commit = _git(job.cwd, "rev-parse", "HEAD")[1]
-        argv = build_argv(job.prompt, session_id=job.session_id, permission_mode=job.permission_mode,
+        settings = resolve_permission(job.permission_mode if job.permission_mode not in INHERIT_TOKENS
+                                      else FALLBACK_MODE, None)           # 全新的對話沒有「原本」可以沿用
+        argv = build_argv(job.prompt, session_id=job.session_id, permission_mode=settings.permission_mode,
                           allowed_tools=job.allowed_tools, disallowed_tools=job.disallowed_tools,
                           max_budget_usd=job.max_budget_usd or None, output_json=True)
     ensure_install_dir()
@@ -328,7 +343,7 @@ def cmd_release(a):
         return EXIT_OK, {"session_id": s.session_id, "was_busy": False, "released": True,
                          "message": "目前沒有被佔用"}, "目前沒有被佔用，不用釋放"
     described = sess.describe_holder(holder)
-    ok, message = sess.release_session(s.session_id)
+    ok, message = sess.release_session(s.session_id, allow_busy=bool(getattr(a, "even_busy", False)))
     data = {"session_id": s.session_id, "was_busy": True, "released": ok, "message": message, "holder": described}
     return (EXIT_OK if ok else EXIT_FAILED), data, f"{described}\n{message}"
 
@@ -463,10 +478,11 @@ def _parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParser:
     sp.add_argument("--turns", type=int, default=0, help="另外印出最近 N 輪（你說什麼、它最後回什麼）")
     add("check", cmd_check, "送出前檢查").add_argument("session")
 
-    def task_flags(sp):
+    def task_flags(sp, permission_default="acceptEdits"):
         sp.add_argument("--prompt", required=True)
         sp.add_argument("--at", default="", help="+30、09:00、2026-10-04 09:00；不給就現在送")
-        sp.add_argument("--permission-mode", default="acceptEdits")
+        sp.add_argument("--permission-mode", default=permission_default,
+                        help="inherit＝照那個對話最後一次互動時的權限模式、模型、effort（resume 的預設）")
         sp.add_argument("--allowed-tools", default="")
         sp.add_argument("--disallowed-tools", default="")
         sp.add_argument("--max-budget-usd", type=float, default=0.0)
@@ -474,13 +490,17 @@ def _parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     sp = add("resume", cmd_resume, "接續舊對話")
     sp.add_argument("session")
-    task_flags(sp)
+    task_flags(sp, permission_default="inherit")
     sp.add_argument("--no-require-clean", action="store_true", help="工作目錄有沒 commit 的改動也照送")
     sp.add_argument("--take-over", action="store_true",
-                    help="到點時對話若正被別的 Claude Code 開著（例如 VSCode），關掉它再送（破壞性；預設是等它關掉）")
+                    help="到點時對話若正被你的 VSCode／終端機開著而且閒著，關掉它（連子程序）再送（破壞性；預設是等它關掉）。"
+                         "正在跑的不從中間砍斷、程式開的（claude -p）不碰，都等下一次重試")
     sp.add_argument("--fork", action="store_true",
                     help="不搶佔：用 --fork-session 續在一個新的對話 id 底下，原本的可以留著開（未實測）")
-    add("release", cmd_release, "把佔用這個對話的 Claude Code 關掉，不送出").add_argument("session")
+    sp = add("release", cmd_release, "把佔用這個對話的 Claude Code 關掉，不送出")
+    sp.add_argument("session")
+    sp.add_argument("--even-busy", action="store_true",
+                    help="它正在跑也關（預設只關閒著的；程式開的 claude -p 不論如何都不關）")
     sp = add("new", cmd_new, "在專案開一個全新的對話")
     sp.add_argument("--cwd", required=True)
     sp.add_argument("--name", default="")

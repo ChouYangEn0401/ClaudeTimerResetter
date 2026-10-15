@@ -27,10 +27,12 @@ from pathlib import Path
 from ..paths import ensure_install_dir, resume_task_log
 from . import journal
 from .jobs import BUSY_FORK, BUSY_TAKEOVER, BUSY_WAIT
-from .launch import CONFIRM_SECONDS, build_argv, claude_prefix, start_detached
+from .inherit import INHERIT, resolve as resolve_permission, takeover_preamble
+from .launch import CONFIRM_SECONDS, build_argv, claude_prefix, outcome_line, read_outcome, start_detached
 from .sessions import SessionInfo, describe_holder, release_session, session_holder
 
-PERMISSION_MODES = ["(不覆寫)", "acceptEdits", "bypassPermissions", "dontAsk", "plan"]
+# 第一個是預設（v1.4）。「(不覆寫)」留在最後給知道自己在做什麼的人：它不是「沿用」，是 headless 的 default。
+PERMISSION_MODES = [INHERIT, "auto", "acceptEdits", "dontAsk", "plan", "bypassPermissions", "(不覆寫)"]
 
 # 到點時那個對話正被別的 Claude Code 開著（最常見：還開在 VSCode）要怎麼辦。
 # 以前只有「等它關掉再補送」跟一顆立刻執行的「強制接管並送出」；本人（2026-10-08）要的是
@@ -53,10 +55,18 @@ BUSY_SHORT = {BUSY_WAIT: "", BUSY_TAKEOVER: "·到時接管", BUSY_FORK: "·分�
 # 每個權限模式的說明（GUI 即時顯示）。resumer 是 --print 非互動執行，沒有人能回應
 # 中途的權限提示，所以這個下拉在這裡比想像中重要。
 PERMISSION_HELP = {
+    INHERIT: (
+        "照那個對話最後一次在 VSCode／終端機裡用的權限模式、模型、effort 接著做（從對話紀錄讀）。\n"
+        "你在 VSCode 開 auto，接手的就是 auto；bypassPermissions 不沿用（背景沒人看著），改用 auto。最建議。"
+    ),
+    "auto": (
+        "分類器代替你按同意：一般的讀寫、指令放行，危險的擋下。\n"
+        "跟你在 VSCode 裡用 auto 一樣；適合「睡覺時讓它接著做」。"
+    ),
     "(不覆寫)": (
-        "沿用那個對話 / 專案原本的設定，不加任何參數，最保守。\n"
-        "注意：接續是非互動執行，若中途需要權限確認，沒有人能按「同意」，"
-        "它可能就停在那裡。會改到檔案的接續建議改選 acceptEdits。"
+        "不加任何參數＝headless 的預設模式（default），**不是**沿用原本的。\n"
+        "接續是非互動執行，要權限的工具沒有人能按「同意」：白名單以外的指令、工作目錄以外的檔案都會被拒，"
+        "它多半會停住。2026-10-15 那一晚就是這樣。除非你確定它只需要白名單裡的東西，不然別選。"
     ),
     "acceptEdits": (
         "自動同意「檔案編輯」類的權限，不會停下來問。\n"
@@ -129,6 +139,8 @@ class Task:
         self.proc: subprocess.Popen | None = None
         self.fired_at: float | None = None
         self.log_path = resume_task_log(self.id)
+        self.took_over = False              # 人按「立刻接管」：送出時加接管說明
+        self.outcome: str = ""              # 背景行程結束後，照它的結果 JSON 寫的那一句
 
     # -- 給畫面用 --
 
@@ -140,7 +152,7 @@ class Task:
             self.session.display,
             " ".join(self.prompt.split())[:40],
             mode,
-            self.status if not self.error else f"{self.status}",
+            (f"{self.status}：{self.outcome}" if self.outcome and self.status == STATUS_SENT else self.status),
         )
 
     @property
@@ -167,14 +179,17 @@ class Task:
 
         holder = session_holder(self.session.session_id)
         fork = False
+        took_over = False
         if holder:
             if self.busy_policy == BUSY_TAKEOVER:
+                # 到點的接管：正在跑的、程式開的都不殺，等下一輪 tick 再試（sessions.release_session）
                 ok, message = release_session(self.session.session_id)
                 journal.write(f"RELEASE task={self.id} {message}")
                 if not ok:
                     self.status = STATUS_LOCKED
-                    self.error = f"到時接管失敗：{message}；會再試"
+                    self.error = f"還沒接管：{message}"
                     return False
+                took_over = True
             elif self.busy_policy == BUSY_FORK:
                 fork = True   # 不搶佔，續在新的對話 id 底下
             else:
@@ -182,12 +197,20 @@ class Task:
                 self.error = f"{describe_holder(holder)}，請關閉後它會自動補送"
                 return False
 
+        took_over = took_over or self.took_over
+        settings = resolve_permission(self.permission_mode, self.session.jsonl)
+        prompt = self.prompt
+        if took_over:
+            prompt = takeover_preamble(at=datetime.now().strftime("%m-%d %H:%M"),
+                                       permission_mode=settings.permission_mode) + prompt
         try:
-            args = build_argv(self.prompt, resume=self.session.session_id, permission_mode=self.permission_mode,
-                              fork_session=fork)
+            args = build_argv(prompt, resume=self.session.session_id, permission_mode=settings.permission_mode,
+                              model=settings.model or None, effort=settings.effort or None,
+                              fork_session=fork, output_json=True)
         except Exception as e:
             self._fail(f"取得 claude 執行檔失敗：{e}")
             return False
+        journal.write(f"PERMISSION task={self.id} {settings.note}")
         ensure_install_dir()
         try:
             # 一定要在該對話自己的專案資料夾裡跑；送出的是獨立行程（launch.py）
@@ -221,6 +244,23 @@ class Task:
             journal.write(f"SENT task={self.id}（已完成，exit 0）")
             return True
         self._fail(f"claude 以 exit {rc} 結束：{self._log_tail()}")
+        return True
+
+    def check_outcome(self) -> bool:
+        """已送出、背景行程結束了：照結果 JSON 寫成一句（完成／被權限擋了 N 種／claude 回報錯誤）。回傳有沒有變。
+
+        「撐過 60 秒」只代表沒有立刻炸掉；做了什麼要看結果（v1.4）。"""
+        if self.status != STATUS_SENT or self.outcome or self.proc is None or self.proc.poll() is None:
+            return False
+        outcome = read_outcome(self.log_path)
+        if outcome is None:
+            self.outcome = f"結束了，但 log 裡沒有結果：{self._log_tail(160)}"
+        else:
+            self.outcome = outcome_line(outcome)
+            if outcome.get("is_error"):
+                self.status = STATUS_FAILED
+                self.error = self.outcome
+        journal.write(f"OUTCOME task={self.id} {self.outcome}")
         return True
 
     def _log_tail(self, limit: int = 300) -> str:
