@@ -163,6 +163,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual(git(self.repo, "branch", "--list"), branches)            # 沒有多一個分支
         self.assertIn("?? new.txt", git(self.repo, "status", "--porcelain"))      # 暫存區沒被動到
         self.assertIn("changed by claude", (self.repo / "README.md").read_text(encoding="utf-8"))
+        # 接手的那一段知道那些改動是上一段留下的、要照原樣接著做（擁有者 2026-10-15：「下一個 session 接手時會遇到什麼」）
+        args = self.claude_args()[-1]
+        sent = args[args.index("--print") + 1]
+        self.assertIn(ref, sent)
+        self.assertIn("還沒 commit", sent)
+        self.assertIn("不要 git stash、reset、checkout", sent)
+        self.assertTrue(sent.endswith("continue"))
         code, job = self.run_cli("resume", self.sid, "--prompt", "again", "--no-require-clean")   # 舊旗標還收
         self.assertEqual(job["status"], "done")
 
