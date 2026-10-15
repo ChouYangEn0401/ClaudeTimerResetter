@@ -206,7 +206,7 @@ def fire(job: store.Job) -> int:
         if _is_repo(run_cwd):
             start_commit = _git(run_cwd, "rev-parse", "HEAD")[1]
         settings = resolve_permission(job.permission_mode, session.jsonl)
-        prompt = job.prompt
+        prompt = snapshot.prompt_note(snap) + job.prompt      # 接手前存了快照：告訴它那些改動要照原樣接著做
         if took_over:
             prompt = takeover_preamble(at=datetime.now().strftime("%m-%d %H:%M"),
                                        permission_mode=settings.permission_mode) + prompt

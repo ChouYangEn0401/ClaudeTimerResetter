@@ -144,6 +144,7 @@ class Task:
         self.took_over = False              # 人按「立刻接管」：送出時加接管說明
         self.outcome: str = ""              # 背景行程結束後，照它的結果 JSON 寫的那一句
         self.snapshot_ref: str = ""         # 接手前存的快照（v1.5；乾淨的就是空的）
+        self._snapshot = snapshot.Snapshot()
         self.was_taken_over = False         # 這一次送出有關掉持有者（做完的通知會講）
 
     # -- 給畫面用 --
@@ -211,7 +212,7 @@ class Task:
         took_over = took_over or self.took_over
         self.was_taken_over = took_over
         settings = resolve_permission(self.permission_mode, self.session.jsonl)
-        prompt = self.prompt
+        prompt = snapshot.prompt_note(self._snapshot) + self.prompt   # 接手前存了快照：告訴它照原樣接著做
         if took_over:
             prompt = takeover_preamble(at=datetime.now().strftime("%m-%d %H:%M"),
                                        permission_mode=settings.permission_mode) + prompt
@@ -282,7 +283,7 @@ class Task:
     def take_snapshot(self, reason: str) -> str:
         """存一份專案資料夾現在的樣子（snapshot.py）；回傳那一句話（給畫面、journal）。"""
         snap = snapshot.take(self.session.cwd, self.session.session_id, reason=reason)
-        self.snapshot_ref = snap.ref
+        self._snapshot, self.snapshot_ref = snap, snap.ref
         journal.write(f"SNAPSHOT task={self.id} {snap.note}")
         return snap.note
 

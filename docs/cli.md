@@ -72,6 +72,7 @@ scripts\ctr.bat job <id>                                 :: 做完了沒、它�
   ——不是分支，`git branch`、`git log` 看不到，`git push` 不會帶出去，你的工作目錄、暫存區都不動；`.gitignore` 照樣有效，
   `.env` 這種不會被存進去。留最新 20 份；沒變的重試沿用同一份。job 的 `snapshot` 欄位就是那一份，
   `git diff <那一份>` 看接手後改了什麼、`git restore --source=<那一份> -- <檔案>` 拿回來。
+  **不會清掉任何東西**：工作目錄照原樣留給接手的那一段，送出的話前面會多一句告訴它「這幾個還沒 commit 的檔案是上一段的進度，照原樣接著做，不要 stash／reset／checkout 掉，做完一段就 commit」。
   起點 commit 照樣記；做完 `job <id>` 看得到改了什麼，不要的話 `stash <id>` 收起來。
 - **工具限制、預算**：`--allowed-tools`／`--disallowed-tools`／`--max-budget-usd` 原樣交給 claude。
 

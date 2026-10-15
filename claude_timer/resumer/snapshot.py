@@ -109,6 +109,19 @@ def take(cwd: str, session_id: str = "", *, reason: str = "接手前") -> Snapsh
                     note=f"接手前先存了快照：{len(changed)} 個檔案還沒 commit → {ref}")
 
 
+def prompt_note(snap: Snapshot) -> str:
+    """接手的那一段 Claude 要知道的事：還沒 commit 的改動是上一段留下的進度，檔案都在原處，照原樣接著做。
+
+    擁有者 2026-10-15 問「是不是把東西都清空？下一個 session 接手時會遇到什麼？」——不會清空；
+    但接手的人不知道那些改動是誰的，可能會想 stash／reset 掉，所以直接講清楚。"""
+    if not snap.taken:
+        return ""
+    return (f"（接手前，ClaudeTimerResetter 把專案資料夾存了一份快照：{snap.ref}。工作目錄裡有 {snap.files} 個檔案"
+            "還沒 commit——那是上一段留下的進度，檔案都還在原處、沒有被清掉。照原樣接著做，"
+            "不要 git stash、reset、checkout 掉它們；做完一個段落就 commit。"
+            f"要看接手後改了什麼：git diff {snap.ref}。）\n\n")
+
+
 def listing(cwd: str) -> list[str]:
     """這個 repo 的快照，新的在前。"""
     code, text = _git(cwd, "for-each-ref", "--sort=-refname", "--format=%(refname)", PREFIX)
