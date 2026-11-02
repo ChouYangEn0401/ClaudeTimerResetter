@@ -277,7 +277,8 @@ class Task:
         # 背景那一段沒有人看著：做完講一聲（另開執行緒，Notifier 沒開著要等它起來，畫面不能卡住）
         text = notify.finished_text(self.session.project, self.outcome, took_over=self.was_taken_over,
                                     snapshot_ref=self.snapshot_ref, failed=self.status == STATUS_FAILED)
-        threading.Thread(target=notify.send, args=(text,), daemon=True, name="resumer-notify").start()
+        threading.Thread(target=notify.send, args=(text,), kwargs={"failed": self.status == STATUS_FAILED},
+                         daemon=True, name="resumer-notify").start()
         return True
 
     def take_snapshot(self, reason: str) -> str:

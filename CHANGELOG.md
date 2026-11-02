@@ -1,5 +1,13 @@
 # 更動記錄
 
+## v1.5.2
+
+- 做完傳的那一則**先經 ClawBot 的 Host**（`POST /v1/notify`，只給擁有者，照它的分流表挑 bot）：做完是 `task.done`
+  （主機 bot、不響），失敗是 `task.problem`（主機 bot、會響）。網址與 token 每次讀 ClawBot 的 `data/gateway.json`
+  （環境變數 `CLAWBOT_HOME` → 旁邊的 `../MyFirstTelegramClawBot` → `~/Documents/MyFirstTelegramClawBot`）。
+  ClawBot 找不到、連不上、說不行，才照舊往 Notifier_TB 的 socket 丟（沒開著照樣幫它開）。journal 記一行走了哪一條；
+  `CLAUDE_RESUMER_NOTIFY=0` 兩條都關（擁有者 2026-11-02：「全部都改，按照現在的分流架構，決定應該要把訊息塞給誰」）。
+
 ## v1.5.1
 
 - 接手前存了快照的話，送給接手那一段的話前面多一句：工作目錄裡還沒 commit 的檔案是上一段的進度、檔案都在原處，照原樣接著做，不要 git stash／reset／checkout 掉，做完一段就 commit（擁有者 2026-10-15 問「下一個 session 接手時會遇到什麼」）。
