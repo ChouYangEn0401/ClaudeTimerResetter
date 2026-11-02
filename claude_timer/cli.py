@@ -257,7 +257,7 @@ def fire(job: store.Job) -> int:
 
 
 def _start_watcher(job: store.Job) -> None:
-    """另開一個不掛在任何東西底下的小行程，等這筆做完就經 Notifier_TB 講一聲（cmd_watch）。"""
+    """另開一個不掛在任何東西底下的小行程，等這筆做完就講一聲（cmd_watch；先經 ClawBot，不行才經 Notifier_TB）。"""
     if getattr(sys, "frozen", False):
         return
     try:
@@ -279,7 +279,7 @@ def cmd_watch(a):
     while time.monotonic() < deadline:
         job = refresh(store.get(a.job))
         if job.status in store.FINAL:
-            sent = notify.send(finished_notice(job))
+            sent = notify.send(finished_notice(job), failed=job.status == store.FAILED)
             return EXIT_OK, {"job": job.id, "status": job.status, "sent": sent}, "已通知" if sent else "沒通知到"
         time.sleep(WATCH_EVERY)
     return EXIT_FAILED, {"job": a.job, "sent": False}, "等太久了，不等了"

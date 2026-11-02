@@ -34,7 +34,7 @@ scripts\ctr.bat job <id>                                 :: 做完了沒、它�
 共用選項：`--permission-mode`（`resume` 預設 `inherit`＝照那個對話最後一次互動時的權限模式、模型、effort，
 `bypassPermissions` 不沿用；`new` 預設 `acceptEdits`；其他：`auto`／`plan`／`bypassPermissions`／`dontAsk`／`default`）、
 `--allowed-tools`、`--disallowed-tools`、`--max-budget-usd`（都原樣交給 claude）、`--dry-run`（排時間時只產生
-工作排程的 XML，不真的註冊）、`--notify`（做完經 Notifier_TB 傳一則到 Telegram；接管的一定傳，ClawBot 派的它自己會說）。`new` 另有 `--sandbox worktree|none`、`--name`。（`resume --no-require-clean` 還收，但 v1.5 起不做事。）
+工作排程的 XML，不真的註冊）、`--notify`（做完傳一則到 Telegram：先經 ClawBot 的 /v1/notify，不行才經 Notifier_TB；接管的一定傳，ClawBot 派的它自己會說）。`new` 另有 `--sandbox worktree|none`、`--name`。（`resume --no-require-clean` 還收，但 v1.5 起不做事。）
 
 ## 結束碼
 
