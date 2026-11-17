@@ -11,3 +11,6 @@ dist/
 
 # 機密：永遠不進版控
 .env
+
+# ClawBot 交過來的研究 HTML（不進版控）
+/docs/from-clawbot/
